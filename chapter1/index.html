@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>บทที่ 1 ภาพดิจิทัลคือตัวเลข | เข้าใจ YOLO11-seg</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+  <p class="topnav"><a href="../">← สารบัญ</a> · หน่วยที่ 1 พื้นฐานการเรียนรู้ของเครื่อง</p>
+  <h1>บทที่ 1 ภาพดิจิทัลคือตัวเลข</h1>
+  <p class="muted">ก่อนจะเข้าใจว่า YOLO "คิด" อย่างไร ต้องรู้ให้แน่ชัดก่อนว่ามัน "ได้รับอะไร"</p>
+
+  <!-- ===================== 1. วัตถุประสงค์ ===================== -->
+  <div class="box info">
+    <span class="box-title">🎯 วัตถุประสงค์การเรียนรู้</span>
+    เมื่อจบบทนี้ คุณควรทำสิ่งต่อไปนี้ได้
+    <ol>
+      <li>อธิบายได้ว่าภาพสีหนึ่งภาพคือชุดตัวเลข 0–255 และบอก shape ได้ทั้งแบบ (H, W, C) และ (C, H, W)</li>
+      <li>บอก shape ของ batch (N, C, H, W) และนับจำนวนตัวเลขในภาพหนึ่งภาพได้</li>
+      <li>คำนวณค่าหลัง normalize แบบที่ Ultralytics ใช้ (หารด้วย 255) ได้</li>
+      <li>คำนวณ scale และ padding ของ letterbox ได้ และอธิบายได้ว่าทำไมไม่ยืดภาพตรง ๆ</li>
+      <li>แปลงพิกัดจากภาพหลัง letterbox กลับไปเป็นพิกัดบนภาพต้นฉบับได้</li>
+    </ol>
+  </div>
+
+  <!-- ===================== 2. ทบทวนความรู้เดิม ===================== -->
+  <h2>ทบทวนความรู้เดิม</h2>
+  <p>
+    บทนี้เป็นบทแรก จึงใช้ความรู้ที่คุณมีอยู่แล้วเพียงสองเรื่อง เรื่องแรก ถ้าซูมภาพในโทรศัพท์เข้าไปมาก ๆ จะเห็นว่าภาพประกอบด้วยสี่เหลี่ยมเล็ก ๆ สีเดียวเรียงกันเป็นตาราง
+    เรื่องที่สองคือ <em>ตาราง</em> ที่มีแถวและคอลัมน์ เช่นตารางใน Excel
+    บทนี้รวมสองเรื่องนี้เข้าด้วยกันเพื่อตอบคำถามว่า <strong>เมื่อเราส่งภาพให้ YOLO11-seg สิ่งที่มันได้รับจริง ๆ คืออะไร</strong>
+    คำตอบคือก้อนตัวเลขขนาดใหญ่ที่จัดเรียงตามรูปแบบที่แน่นอน ก้อนตัวเลขนี้ก็คือสิ่งที่ทุกบทต่อจากนี้จะนำไปคำนวณ
+  </p>
+
+  <!-- ===================== 3. เนื้อหา ===================== -->
+  <h2>1.1 พิกเซลและช่องสี RGB</h2>
+  <p>
+    ภาพดิจิทัลประกอบด้วย <strong>พิกเซล (pixel)</strong> เรียงเป็นตาราง ภาพกว้าง W พิกเซล สูง H พิกเซล ก็มีพิกเซลทั้งหมด H × W จุด
+    แต่ละพิกเซลของภาพสีเก็บตัวเลข 3 ตัว คือความเข้มของแสง <span class="ch-r">แดง (R)</span> <span class="ch-g">เขียว (G)</span> และ <span class="ch-b">น้ำเงิน (B)</span>
+    สีที่ตาเราเห็นเกิดจากการผสมแสงทั้งสามนี้
+  </p>
+  <p>
+    ไฟล์ภาพทั่วไปเก็บตัวเลขแต่ละตัวด้วย <strong>8 บิต (8-bit)</strong> ได้ 2<sup>8</sup> = 256 ระดับ คือ 0 ถึง 255
+    ค่า 0 หมายถึงไม่มีแสงสีนั้นเลย และ 255 หมายถึงแสงสีนั้นเต็มที่ ในโค้ดชนิดข้อมูลนี้เรียกว่า <code>uint8</code> (unsigned 8-bit integer)
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 640 210" width="640" role="img" aria-label="ภาพ 3x3 พิกเซล แยกเป็นตาราง R G B">
+      <style>
+        .t { font: 12px Consolas, monospace; text-anchor: middle; dominant-baseline: middle; }
+        .lb { font: 14px Sarabun, sans-serif; text-anchor: middle; font-weight: 700; }
+      </style>
+      <!-- ภาพ 3x3 -->
+      <g transform="translate(10,30)">
+        <rect x="0"  y="0"  width="50" height="50" fill="rgb(255,0,0)"/>
+        <rect x="50" y="0"  width="50" height="50" fill="rgb(255,255,0)"/>
+        <rect x="100" y="0" width="50" height="50" fill="rgb(0,0,255)"/>
+        <rect x="0"  y="50" width="50" height="50" fill="rgb(0,0,0)"/>
+        <rect x="50" y="50" width="50" height="50" fill="rgb(114,114,114)"/>
+        <rect x="100" y="50" width="50" height="50" fill="rgb(255,255,255)" stroke="#ccc"/>
+        <rect x="0"  y="100" width="50" height="50" fill="rgb(216,38,43)"/>
+        <rect x="50" y="100" width="50" height="50" fill="rgb(240,138,28)"/>
+        <rect x="100" y="100" width="50" height="50" fill="rgb(124,191,42)"/>
+        <text class="lb" x="75" y="170">ภาพ 3×3 พิกเซล</text>
+      </g>
+      <text class="lb" x="185" y="105">=</text>
+      <!-- R -->
+      <g transform="translate(205,30)">
+        <rect width="132" height="150" fill="#fdecea" stroke="#d6453d"/>
+        <text class="t" x="22" y="25">255</text><text class="t" x="66" y="25">255</text><text class="t" x="110" y="25">0</text>
+        <text class="t" x="22" y="75">0</text><text class="t" x="66" y="75">114</text><text class="t" x="110" y="75">255</text>
+        <text class="t" x="22" y="125">216</text><text class="t" x="66" y="125">240</text><text class="t" x="110" y="125">124</text>
+        <text class="lb" x="66" y="170" fill="#d6453d">ช่อง R</text>
+      </g>
+      <g transform="translate(347,30)">
+        <rect width="132" height="150" fill="#e8f6ed" stroke="#2f9e55"/>
+        <text class="t" x="22" y="25">0</text><text class="t" x="66" y="25">255</text><text class="t" x="110" y="25">0</text>
+        <text class="t" x="22" y="75">0</text><text class="t" x="66" y="75">114</text><text class="t" x="110" y="75">255</text>
+        <text class="t" x="22" y="125">38</text><text class="t" x="66" y="125">138</text><text class="t" x="110" y="125">191</text>
+        <text class="lb" x="66" y="170" fill="#2f9e55">ช่อง G</text>
+      </g>
+      <g transform="translate(489,30)">
+        <rect width="132" height="150" fill="#e9effb" stroke="#3b6fd6"/>
+        <text class="t" x="22" y="25">0</text><text class="t" x="66" y="25">0</text><text class="t" x="110" y="25">255</text>
+        <text class="t" x="22" y="75">0</text><text class="t" x="66" y="75">114</text><text class="t" x="110" y="75">255</text>
+        <text class="t" x="22" y="125">43</text><text class="t" x="66" y="125">28</text><text class="t" x="110" y="125">42</text>
+        <text class="lb" x="66" y="170" fill="#3b6fd6">ช่อง B</text>
+      </g>
+      <text x="320" y="14" class="lb" style="font-weight:400;font-size:13px">ภาพสี 1 ภาพ = ตารางตัวเลข 3 ตาราง (ช่องละตาราง) ที่มีขนาดเท่ากัน</text>
+    </svg>
+    <figcaption>รูปที่ 1.1 แดง = (255, 0, 0), เหลือง = (255, 255, 0) คือแดงผสมเขียว, ดำ = (0, 0, 0), ขาว = (255, 255, 255), เทา (114, 114, 114) เป็นสีที่จะพบอีกครั้งในหัวข้อ letterbox</figcaption>
+  </figure>
+
+  <p>
+    ภาพสี 640 × 640 พิกเซลจึงมีตัวเลขทั้งหมด 640 × 640 × 3 = <strong>1,228,800 ตัว</strong> ตัวละ 1 ไบต์ รวมประมาณ 1.2 MB
+    (ไฟล์ .jpg มีขนาดเล็กกว่านี้เพราะถูกบีบอัด แต่เมื่อเปิดอ่านเข้าหน่วยความจำ ภาพจะถูกคลายกลับเป็นตัวเลขครบทุกตัว)
+  </p>
+
+  <!-- ---------- ซิม 1.1 ---------- -->
+  <div class="sim" id="sim11">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 1.1 ส่องพิกเซล</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองเลื่อนเมาส์หรือแตะไปบนแอปเปิลแดง ส้ม และตะกร้า แล้วสังเกตว่าวัตถุที่ "สีเดียวกัน" มีตัวเลขเหมือนกันทุกจุดหรือไม่</p>
+    <div class="controls">
+      ดูภาพ:
+      <button data-ch="rgb" class="on">สีจริง</button>
+      <button data-ch="0">เฉพาะ R</button>
+      <button data-ch="1">เฉพาะ G</button>
+      <button data-ch="2">เฉพาะ B</button>
+      &nbsp; ตัวเลขในตาราง:
+      <button data-scale="255" class="on">0–255</button>
+      <button data-scale="1">0–1</button>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col">
+        <canvas id="pxMain" width="320" height="320" style="width:100%;max-width:320px;cursor:crosshair"></canvas>
+        <p class="small muted">กรอบสีดำ = พื้นที่ 8×8 ที่ขยายให้ดูทางขวา คลิกหรือแตะเพื่อเลือกจุด</p>
+      </div>
+      <div class="sim-col">
+        <canvas id="pxZoom" width="320" height="320" style="width:100%;max-width:320px"></canvas>
+      </div>
+    </div>
+    <div class="sim-out" id="pxOut"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>แอปเปิลลูกเดียวมีค่าสีหลายร้อยแบบ ด้านที่โดนแสงสว่างกว่า ขอบมืดกว่า โมเดลจึงจำ "แอปเปิล" จากตัวเลขค่าเดียวไม่ได้ ต้องจำจาก <em>รูปแบบ</em> ของตัวเลขรอบ ๆ ซึ่งเป็นงานของ CNN ในบทที่ 5–6</li>
+        <li>เมื่อดูเฉพาะช่อง R แอปเปิลแดงและส้มเป็นสีขาวสว่าง (ค่า R สูง) แต่ในช่อง B ทั้งคู่เป็นสีมืด แต่ละช่องจึงให้ข้อมูลคนละแบบ</li>
+        <li>ตรงขอบระหว่างผลไม้สองลูก ค่าสีจะค่อย ๆ เปลี่ยนจากค่าหนึ่งไปอีกค่าหนึ่ง ในภาพจริงไม่มีเส้นขอบคม ๆ ให้โมเดลเห็น</li>
+      </ul>
+    </div>
+  </div>
+
+  <details class="think">
+    <summary>🤔 ลองคิดก่อน: ภาพขาวดำ (grayscale) ขนาด 640×640 มีตัวเลขกี่ตัว</summary>
+    ภาพขาวดำมีช่องเดียว (C = 1) จึงมี 640 × 640 × 1 = 409,600 ตัว น้อยกว่าภาพสีสามเท่า
+    YOLO11 ที่เทรนบน COCO รับภาพ 3 ช่อง ถ้าป้อนภาพขาวดำผ่าน <code>model.predict()</code> ภาพจะถูกอ่านเป็นภาพ 3 ช่องที่ทั้งสามช่องมีค่าเท่ากัน
+  </details>
+
+  <h2>1.2 Tensor และ shape</h2>
+  <p>
+    <strong>Tensor</strong> คืออาร์เรย์ของตัวเลขที่มีกี่มิติก็ได้ ตัวเลขตัวเดียวเป็น tensor 0 มิติ รายการตัวเลขเป็น 1 มิติ ตารางเป็น 2 มิติ
+    และตารางหลายชั้นซ้อนกันเป็น 3 มิติ
+    <strong>Shape</strong> คือการบอกขนาดของแต่ละมิติเป็นทูเพิล (tuple) เช่น <code>(3, 640, 640)</code>
+  </p>
+  <p>ภาพสีเป็น tensor 3 มิติ แต่เรียงมิติได้สองแบบ</p>
+  <div class="table-wrap">
+  <table>
+    <tr><th>รูปแบบ</th><th>shape</th><th>ใครใช้</th><th>อ่านค่าพิกเซล (y, x)</th></tr>
+    <tr><td><strong>HWC</strong> (Height, Width, Channel)</td><td><code>(640, 640, 3)</code></td><td>ไฟล์ภาพ, OpenCV, NumPy, PIL</td><td><code>img[y, x]</code> → ได้ 3 ค่า</td></tr>
+    <tr><td><strong>CHW</strong> (Channel, Height, Width)</td><td><code>(3, 640, 640)</code></td><td>PyTorch (ซึ่ง YOLO11 ใช้)</td><td><code>t[:, y, x]</code> → ได้ 3 ค่า</td></tr>
+  </table>
+  </div>
+  <p>
+    ข้อควรจำคือ <strong>ลำดับในวงเล็บเป็นแถว (y) ก่อนคอลัมน์ (x) เสมอ</strong> ภาพกว้าง 1280 สูง 720 จึงมี shape <code>(720, 1280, 3)</code> ไม่ใช่ (1280, 720, 3)
+    คนพูดขนาดภาพเป็น "กว้าง×สูง" แต่ tensor เก็บเป็น "สูง, กว้าง" ความต่างนี้ทำให้เกิดบั๊กบ่อยมาก
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 520 230" width="520" role="img" aria-label="tensor CHW เป็นตาราง 3 ชั้นซ้อนกัน">
+      <style>.a{font:14px Sarabun,sans-serif;} .m{font:13px Consolas,monospace;}</style>
+      <rect x="110" y="20" width="150" height="150" fill="#e9effb" stroke="#3b6fd6" stroke-width="2"/>
+      <text class="a" x="185" y="40" text-anchor="middle" fill="#3b6fd6">B</text>
+      <rect x="90" y="40" width="150" height="150" fill="#e8f6ed" stroke="#2f9e55" stroke-width="2"/>
+      <text class="a" x="165" y="60" text-anchor="middle" fill="#2f9e55">G</text>
+      <rect x="70" y="60" width="150" height="150" fill="#fdecea" stroke="#d6453d" stroke-width="2"/>
+      <text class="a" x="145" y="140" text-anchor="middle" fill="#d6453d">R</text>
+      <!-- แกน -->
+      <line x1="50" y1="60" x2="50" y2="210" stroke="#333" marker-end="url(#ar)"/>
+      <text class="a" x="20" y="140">H</text>
+      <line x1="70" y1="222" x2="220" y2="222" stroke="#333" marker-end="url(#ar)"/>
+      <text class="a" x="140" y="218" text-anchor="middle">W</text>
+      <line x1="225" y1="55" x2="265" y2="15" stroke="#333" marker-end="url(#ar)"/>
+      <text class="a" x="262" y="45">C</text>
+      <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#333"/></marker></defs>
+      <text class="m" x="300" y="80">shape = (C, H, W)</text>
+      <text class="m" x="300" y="105">      = (3, 640, 640)</text>
+      <text class="a" x="300" y="140">แต่ละชั้นคือภาพของช่องสีหนึ่งช่อง</text>
+      <text class="a" x="300" y="162">ขนาด H × W</text>
+    </svg>
+    <figcaption>รูปที่ 1.2 ในแบบ CHW ภาพคือ "ตาราง 3 ชั้น" ช่อง R ทั้งภาพอยู่ชั้นแรก ตามด้วยชั้น G และชั้น B</figcaption>
+  </figure>
+
+  <p>
+    ทำไม PyTorch ใช้ CHW ในบทที่ 5 คุณจะเห็นว่า convolution ทำงานบน "ระนาบ" H × W ของแต่ละช่อง
+    การเก็บตัวเลขของช่องเดียวกันไว้ติดกันจึงสะดวกต่อการคำนวณ และไลบรารีของ PyTorch ก็ออกแบบให้ใช้ลำดับนี้เป็นค่าเริ่มต้น
+    ซิมมูเลชั่นด้านล่างแสดงว่าตัวเลขชุดเดียวกันถูกวางเรียงในหน่วยความจำต่างกันอย่างไร
+  </p>
+
+  <!-- ---------- ซิม 1.3 ---------- -->
+  <div class="sim" id="sim13">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 1.3 HWC กับ CHW ในหน่วยความจำ</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองคลิกพิกเซลในภาพ 4×4 แล้วสังเกตว่าตัวเลข 3 ตัวของพิกเซลนั้นอยู่ติดกันในแบบไหน และกระจายห่างกันในแบบไหน</p>
+    <div class="sim-row">
+      <div style="flex:0 0 auto">
+        <div id="hwcGrid" style="display:grid;grid-template-columns:repeat(4,48px);gap:2px"></div>
+        <p class="small muted">ภาพ H=4, W=4, C=3</p>
+      </div>
+      <div class="sim-col">
+        <div class="sim-out" id="hwcInfo"></div>
+      </div>
+    </div>
+    <p style="margin:12px 0 4px"><strong>HWC</strong> shape (4, 4, 3): ตัวเลข 48 ตัวเรียงต่อกัน แบบ R G B ของพิกเซลแรก แล้ว R G B ของพิกเซลถัดไป …</p>
+    <div id="memHWC" style="display:flex;flex-wrap:wrap;gap:2px"></div>
+    <p style="margin:12px 0 4px"><strong>CHW</strong> shape (3, 4, 4): R ทั้ง 16 ตัวก่อน แล้ว G ทั้ง 16 ตัว แล้ว B ทั้ง 16 ตัว</p>
+    <div id="memCHW" style="display:flex;flex-wrap:wrap;gap:2px"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>ตัวเลขทั้ง 48 ตัวเป็นชุดเดียวกัน ต่างกันแค่ลำดับ การแปลง HWC → CHW (<code>transpose</code>) จึงไม่ได้เปลี่ยนค่าใดเลย</li>
+        <li>ใน HWC ค่า R, G, B ของพิกเซลเดียวกันอยู่ติดกัน ส่วนใน CHW ค่าของพิกเซลเดียวกันห่างกันทีละ H×W = 16 ตำแหน่ง แต่ค่าช่องเดียวกันของพิกเซลข้างเคียงอยู่ติดกัน</li>
+        <li>ถ้านำตัวเลขแบบ HWC ไปตีความว่าเป็น CHW โดยไม่ transpose จะได้ภาพที่เพี้ยนทั้งภาพ โปรแกรมไม่ error แต่ผลผิด บั๊กแบบนี้จึงหายาก</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>มิติ batch: (N, C, H, W)</h3>
+  <p>
+    โมเดลรับภาพครั้งละหลายภาพพร้อมกันเพื่อให้ GPU ทำงานได้เต็มที่ การนำภาพหลายภาพที่ shape เท่ากันมาซ้อนกันเรียกว่า <strong>batch</strong>
+    ซึ่งเพิ่มมิติข้างหน้าอีกหนึ่งมิติเป็น <code>(N, C, H, W)</code>
+    ค่าเริ่มต้นของ <code>batch</code> ตอนเทรนใน Ultralytics คือ 16 จึงได้ tensor <code>(16, 3, 640, 640)</code>
+    ส่วน <code>model.predict()</code> ตั้ง batch = 1 จึงได้ <code>(1, 3, H, W)</code>
+  </p>
+  <p>
+    ภาพใน batch เดียวกันต้องมี H และ W เท่ากัน เพราะ tensor ต้องเป็นทรงสี่เหลี่ยมเรียบร้อยทุกมิติ ซึ่งเป็นเหตุผลข้อหนึ่งที่ต้องทำ letterbox ในหัวข้อ 1.4
+  </p>
+
+  <details class="think">
+    <summary>🤔 ลองคิดก่อน: ใน tensor shape (1, 3, 640, 640) ตัวเลขที่ตำแหน่ง [0, 2, 10, 20] คือค่าอะไร</summary>
+    ภาพที่ 0 ใน batch, ช่องที่ 2 (นับจาก 0 คือ R=0, G=1, B=2 จึงเป็นช่อง <span class="ch-b">B</span>), แถว y = 10, คอลัมน์ x = 20
+    แปลว่าเป็นค่าสีน้ำเงินของพิกเซลที่อยู่ห่างจากขอบบน 10 แถวและห่างจากขอบซ้าย 20 คอลัมน์
+  </details>
+
+  <h3>กับดัก: OpenCV อ่านภาพเป็น BGR</h3>
+  <p>
+    <code>cv2.imread()</code> ของ OpenCV ให้ภาพแบบ HWC ที่เรียงช่องเป็น <strong>B, G, R</strong> ไม่ใช่ R, G, B
+    ส่วนโมเดล YOLO11 เทรนด้วยภาพ RGB ตัว predictor ของ Ultralytics จึงกลับลำดับช่องก่อนส่งเข้าโมเดล
+    (ดูบรรทัด <code>im[..., ::-1]</code> ในโค้ดหัวข้อ 1.5)
+  </p>
+
+  <h2>1.3 Normalization</h2>
+  <p>
+    ก่อนเข้าโมเดล ตัวเลข 0–255 จะถูกเปลี่ยนเป็นทศนิยม (<code>float32</code>) ช่วง 0.0–1.0 ด้วยการหารด้วย 255
+  </p>
+  <pre><code>x_normalized = x / 255</code></pre>
+  <p>
+    ตัวอย่าง: 255 → 1.0, 128 → 0.502, 114 → 0.447, 0 → 0.0
+  </p>
+  <p>
+    เหตุผลคือในบทที่ 2–3 เครือข่ายประสาทเทียมจะนำค่าอินพุตไปคูณกับน้ำหนัก (weight) แล้วปรับน้ำหนักทีละนิดตามความชัน (gradient)
+    การคำนวณนี้เสถียรเมื่ออินพุตมีขนาดเล็กและอยู่ในช่วงที่แน่นอน ถ้าป้อนค่าใหญ่ถึง 255 ผลรวมในชั้นแรก ๆ จะใหญ่ผิดปกติและการเทรนจะแกว่ง
+    และเนื่องจากต้องเก็บค่าที่เป็นเศษส่วนได้ จึงต้องเปลี่ยนชนิดข้อมูลจาก <code>uint8</code> เป็น float ด้วย
+  </p>
+  <div class="box tip">
+    <span class="box-title">💡 รายละเอียดจากโค้ดจริง</span>
+    <ul>
+      <li>Ultralytics <strong>หารด้วย 255 อย่างเดียว</strong> ไม่ได้ลบค่าเฉลี่ยหรือหารด้วยส่วนเบี่ยงเบนมาตรฐาน (mean/std) แบบที่โมเดลจำแนกภาพหลายตัวทำ</li>
+      <li>ใน <code>predictor.preprocess</code> การหาร 255 เกิดขึ้น <strong>เฉพาะเมื่ออินพุตไม่ใช่ torch.Tensor</strong> (<code>if not_tensor: im /= 255</code>)
+        ถ้าคุณส่ง tensor เข้า <code>model.predict()</code> เอง ต้อง normalize เป็น 0–1 ให้เรียบร้อยก่อน มิฉะนั้นโมเดลจะเห็นค่าสูงสุดถึง 255 และทำนายผิดทั้งหมด</li>
+    </ul>
+  </div>
+
+  <h2>1.4 Letterbox: ทำให้ทุกภาพมีขนาดที่โมเดลรับได้</h2>
+  <p>
+    ภาพจริงมีหลายขนาด เช่น ภาพจากกล้องแนวนอน 1280×720 หรือภาพจากโทรศัพท์แนวตั้ง 1080×1920 แต่โมเดลมีเงื่อนไขสองข้อ
+  </p>
+  <ol>
+    <li>ขนาดภาพ (<code>imgsz</code>) ค่าเริ่มต้นคือ <strong>640</strong> โมเดลถูกเทรนให้เห็นวัตถุในขนาดประมาณนี้</li>
+    <li>ด้านกว้างและสูงต้อง <strong>หารด้วย 32 ลงตัว</strong> เพราะภายในโมเดล ภาพจะถูกย่อครึ่งหนึ่งต่อกัน 5 ครั้ง (2<sup>5</sup> = 32) ซึ่งจะเห็นในบทที่ 6 และ 9</li>
+  </ol>
+  <p>ทำได้สองวิธี</p>
+  <ul>
+    <li><strong>ยืดตรง ๆ (stretch)</strong> ย่อหรือขยายให้เป็น 640×640 ทันที ภาพจะบิดสัดส่วน ส้มกลม ๆ กลายเป็นวงรี วัตถุจึงมีรูปทรงไม่เหมือนที่โมเดลเคยเห็นตอนเทรน</li>
+    <li><strong>Letterbox</strong> ย่อภาพด้วยอัตราส่วนเดียวกันทั้งแนวกว้างและแนวสูงจนด้านยาวเท่ากับ 640 แล้ว <strong>เติมขอบสีเทา (114, 114, 114)</strong> ในส่วนที่เหลือ
+      ชื่อนี้มาจากแถบดำบนล่างเวลาดูภาพยนตร์จอกว้างบนทีวีจอเก่า</li>
+  </ul>
+
+  <h3>สูตรจากโค้ดจริง (<code>ultralytics/data/augment.py</code> คลาส <code>LetterBox</code>)</h3>
+  <pre><code><span class="cmt"># shape = (H, W) ของภาพต้นฉบับ, new_shape = (640, 640)</span>
+r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])   <span class="cmt"># อัตราส่วนย่อ ใช้ค่าเดียวทั้งสองแกน</span>
+new_unpad = round(shape[1] * r), round(shape[0] * r)        <span class="cmt"># (กว้าง, สูง) หลังย่อ</span>
+dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  <span class="cmt"># ส่วนที่ขาด</span>
+if self.auto:                                               <span class="cmt"># โหมดสี่เหลี่ยมเล็กสุด</span>
+    dw, dh = np.mod(dw, self.stride), np.mod(dh, self.stride)   <span class="cmt"># เติมแค่ให้หาร 32 ลงตัว</span>
+dw /= 2; dh /= 2                                            <span class="cmt"># แบ่งครึ่งไปสองฝั่ง (center=True)</span>
+img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+top, bottom = round(dh - 0.1), round(dh + 0.1)              <span class="cmt"># ถ้าเป็นเลขคี่ ฝั่งล่าง/ขวาได้มากกว่า 1</span>
+left, right = round(dw - 0.1), round(dw + 0.1)
+img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))</code></pre>
+  <p class="small muted">ตัดมาเฉพาะส่วนสำคัญ ค่าเริ่มต้นใน <code>__init__</code> คือ <code>auto=False, scaleup=True, center=True, stride=32, padding_value=114</code></p>
+
+  <h3>ตัวอย่าง: ภาพ 1280×720</h3>
+  <ul>
+    <li>r = min(640/720, 640/1280) = min(0.889, 0.5) = <strong>0.5</strong> (ด้านกว้างเป็นตัวจำกัด)</li>
+    <li>ขนาดหลังย่อ = round(1280×0.5) × round(720×0.5) = <strong>640 × 360</strong> สัดส่วนยังเป็น 16:9 เท่าเดิม</li>
+    <li>dw = 640 − 640 = 0, dh = 640 − 360 = 280 → แบ่งครึ่ง: บน 140, ล่าง 140</li>
+    <li>ผลลัพธ์ <strong>640 × 640</strong> โดยมีแถบเทาบนล่างรวม 280 แถว คิดเป็น 43.75% ของพื้นที่ทั้งหมด</li>
+  </ul>
+
+  <h3>แต่ <code>model.predict()</code> ไม่ได้ใช้ 640×640 เสมอไป</h3>
+  <p>
+    แถบเทา 43.75% เป็นการคำนวณที่สูญเปล่า ตอน predict Ultralytics จึงใช้ <strong><code>auto=True</code></strong> ซึ่งเติมขอบเพียงให้ด้านนั้นหารด้วย 32 ลงตัว
+    สำหรับภาพ 1280×720: dh = 280 mod 32 = 24 → บน 12, ล่าง 12 → ได้ <strong>640 × 384</strong>
+  </p>
+  <p>
+    ตรวจจากโค้ดได้ว่าเงื่อนไขอยู่ใน <code>engine/predictor.py</code> เมธอด <code>pre_transform</code>:
+    <code>auto = same_shapes and self.args.rect and (self.model.pt or ...)</code>
+    และ <code>model.predict()</code> ตั้ง <code>rect=True</code> เป็นค่าเริ่มต้น (<code>engine/model.py</code>)
+    ผลคือ ถ้าภาพทุกภาพใน batch มีขนาดเท่ากัน และโมเดลเป็นไฟล์ PyTorch <code>.pt</code> จะได้สี่เหลี่ยมผืนผ้าเล็กที่สุด
+    แต่ถ้าโมเดลถูก export เป็นไฟล์ขนาดคงที่ (เช่น ONNX แบบไม่ dynamic) จะได้ 640×640 เสมอ
+  </p>
+  <div class="box info">
+    <span class="box-title">🔬 ยืนยันด้วยการรันจริง (ultralytics 8.4.2)</span>
+    เมื่อป้อนภาพ 1280×720 เข้า <code>YOLO("yolo11n-seg.pt").predict(...)</code> Ultralytics พิมพ์ log ว่า
+    <pre><code>0: 384x640 (no detections), 84.9ms
+Speed: 6.3ms preprocess, 84.9ms inference, 0.9ms postprocess per image at shape (1, 3, 384, 640)</code></pre>
+    ซึ่งตรงกับที่คำนวณไว้ ส่วนการเทรนและ validation มีขั้นเตรียมภาพของตัวเอง (เช่น mosaic) จะเรียนในบทที่ 11
+  </div>
+  <p class="small">
+    รายละเอียดเพิ่มเติม: ตอน predict <code>scaleup=True</code> ภาพที่เล็กกว่า 640 จะถูก <em>ขยาย</em> ขึ้น เช่น 500×500 → 640×640 (r = 1.28)
+    และการย่อหรือขยายใช้ <code>cv2.INTER_LINEAR</code> (bilinear) ซึ่งเฉลี่ยสีของพิกเซลข้างเคียง
+  </p>
+
+  <!-- ---------- ซิม 1.2 ---------- -->
+  <div class="sim" id="sim12">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 1.2 Letterbox</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองเลือกขนาดภาพต่าง ๆ และสลับโหมด แล้วสังเกตว่าขอบเทาเติมตรงไหนและกว้างเท่าไร จากนั้นคลิกบนภาพขวาเพื่อดูว่าจุดนั้นอยู่ตรงไหนในภาพต้นฉบับ</p>
+    <div class="controls">
+      ขนาดต้นฉบับ (กว้าง×สูง):
+      <button data-wh="1280,720">1280×720</button>
+      <button data-wh="640,480">640×480</button>
+      <button data-wh="1080,1920">1080×1920</button>
+      <button data-wh="500,500">500×500</button>
+      <button data-wh="1000,333">1000×333</button>
+    </div>
+    <div class="controls">
+      <label>กว้าง <input type="range" id="lbW" min="100" max="2000" step="1"> <span class="mono" id="lbWv"></span></label>
+      <label>สูง <input type="range" id="lbH" min="100" max="2000" step="1"> <span class="mono" id="lbHv"></span></label>
+    </div>
+    <div class="controls">
+      โหมด:
+      <button data-mode="square">640×640 (auto=False)</button>
+      <button data-mode="auto">model.predict กับ .pt (auto=True)</button>
+      <button data-mode="stretch">ยืดตรง ๆ (ไม่ใช้จริง)</button>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col">
+        <p class="small" style="margin:0"><strong>ต้นฉบับ</strong> <span class="mono" id="lbSrcLabel"></span></p>
+        <canvas id="lbSrc" width="300" height="300" style="width:100%;max-width:300px"></canvas>
+      </div>
+      <div class="sim-col">
+        <p class="small" style="margin:0"><strong>สิ่งที่เข้าโมเดล</strong> (เส้นประ = กรอบ 640×640)</p>
+        <canvas id="lbDst" width="300" height="300" style="width:100%;max-width:300px;cursor:crosshair"></canvas>
+      </div>
+    </div>
+    <div class="sim-out" id="lbOut"></div>
+    <div class="sim-out" id="lbMap" style="margin-top:6px"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>ขอบเทาเติมด้าน <em>สั้น</em> ของภาพเสมอ ภาพแนวนอนเติมบนล่าง ภาพแนวตั้งเติมซ้ายขวา และแบ่งเท่ากันสองฝั่ง (ถ้าเป็นเลขคี่ ฝั่งล่างหรือขวาได้มากกว่า 1 พิกเซล ลองดู 1000×333)</li>
+        <li>โหมด auto=True ใช้ขอบเทาน้อยกว่ามาก และด้านที่ไม่ใช่ 640 จะเป็นพหุคูณของ 32 เสมอ (384, 480, 224, …)</li>
+        <li>โหมดยืดตรง ๆ ไม่มีขอบเทา แต่ผลไม้กลายเป็นวงรี เทียบตัวเลข rx กับ ry ที่ไม่เท่ากันได้เลย</li>
+        <li>คลิกจุดบนผลไม้ด้านขวา แล้วดูว่าจุดบนภาพต้นฉบับอยู่ที่ผลไม้ลูกเดียวกัน สูตรย้อนกลับคือลบขอบเทาออกแล้วหารด้วย r</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>ย้อน letterbox: พิกัดผลทำนายกลับสู่ภาพจริง</h3>
+  <p>
+    โมเดลทำนายตำแหน่งวัตถุบน <em>ภาพที่เข้าโมเดล</em> แต่ผู้ใช้ต้องการตำแหน่งบน <em>ภาพต้นฉบับ</em>
+    ขั้นสุดท้ายของ pipeline จึงต้องย้อนกลับด้วยสูตรที่สลับลำดับของ letterbox (ฟังก์ชัน <code>scale_boxes</code> ใน <code>ultralytics/utils/ops.py</code>)
+  </p>
+  <pre><code>x_original = (x − left) / r
+y_original = (y − top)  / r</code></pre>
+  <p>
+    ตัวอย่าง: ภาพ 1280×720 ในโหมด 640×640 (r = 0.5, top = 140) จุด (320, 200) บนภาพที่เข้าโมเดลตรงกับ
+    ((320 − 0)/0.5, (200 − 140)/0.5) = <strong>(640, 120)</strong> บนภาพต้นฉบับ
+    สำหรับ instance segmentation <code>segment/predict.py</code> เรียก <code>scale_boxes</code> กับกล่อง และ mask ก็ต้องผ่านการตัดขอบเทาออกและปรับขนาดกลับในทำนองเดียวกัน (รายละเอียดในบทที่ 10)
+  </p>
+
+  <h2>1.5 รวมทุกขั้น: เส้นทางของภาพก่อนเข้าโมเดล</h2>
+  <p>
+    นี่คือโค้ดจริงใน <code>ultralytics/engine/predictor.py</code> เมธอด <code>preprocess</code> ตอนนี้คุณอ่านเข้าใจได้ทุกบรรทัดแล้ว
+  </p>
+  <pre><code>im = np.stack(self.pre_transform(im))     <span class="cmt"># letterbox ทุกภาพ แล้วซ้อนเป็น batch: (N, H, W, 3) BGR uint8</span>
+if im.shape[-1] == 3:
+    im = im[..., ::-1]                    <span class="cmt"># BGR → RGB (กลับลำดับมิติสุดท้าย)</span>
+im = im.transpose((0, 3, 1, 2))           <span class="cmt"># BHWC → BCHW: (N, 3, H, W)</span>
+im = np.ascontiguousarray(im)             <span class="cmt"># จัดเรียงในหน่วยความจำใหม่ให้ต่อเนื่อง (ดูซิม 1.3)</span>
+im = torch.from_numpy(im)
+im = im.to(self.device)                   <span class="cmt"># ย้ายไป GPU ถ้ามี</span>
+im = im.half() if self.model.fp16 else im.float()   <span class="cmt"># uint8 → float</span>
+if not_tensor:
+    im /= 255                             <span class="cmt"># 0–255 → 0.0–1.0</span></code></pre>
+
+  <p>ติดตามภาพตัวอย่าง <code>bus.jpg</code> ที่มากับ Ultralytics (ขนาด 810×1080) ผ่านแต่ละขั้น ตัวเลขทั้งหมดได้จากการรันจริง</p>
+  <div class="table-wrap">
+  <table>
+    <tr><th>ขั้น</th><th>shape</th><th>ชนิด / ช่วงค่า</th></tr>
+    <tr><td>อ่านไฟล์ <code>cv2.imread</code></td><td><code>(1080, 810, 3)</code></td><td>uint8 0–255, ลำดับ BGR</td></tr>
+    <tr><td>Letterbox (auto=True): r = min(640/1080, 640/810) = 0.593 → 480×640, dw = 160 mod 32 = 0</td><td><code>(640, 480, 3)</code></td><td>uint8 ไม่ต้องเติมขอบเลย</td></tr>
+    <tr><td>ซ้อนเป็น batch</td><td><code>(1, 640, 480, 3)</code></td><td>uint8</td></tr>
+    <tr><td>BGR → RGB</td><td><code>(1, 640, 480, 3)</code></td><td>uint8 ลำดับ RGB</td></tr>
+    <tr><td>transpose เป็น BCHW</td><td><code>(1, 3, 640, 480)</code></td><td>uint8</td></tr>
+    <tr><td>float และหาร 255</td><td><code>(1, 3, 640, 480)</code></td><td>float32 0.0–1.0 รวม 921,600 ตัวเลข</td></tr>
+  </table>
+  </div>
+
+  <details class="think">
+    <summary>🐍 ลองรันเองในเครื่อง (ต้องติดตั้ง ultralytics)</summary>
+<pre><code>import cv2, numpy as np, torch
+from ultralytics.utils import ASSETS
+from ultralytics.data.augment import LetterBox
+
+img = cv2.imread(str(ASSETS / "bus.jpg"))
+print(img.shape, img.dtype)            <span class="cmt"># (1080, 810, 3) uint8</span>
+print("BGR:", img[100, 200], "RGB:", img[100, 200][::-1])
+
+lb = LetterBox(640, auto=True, stride=32)(image=img)
+print(lb.shape)                        <span class="cmt"># (640, 480, 3)</span>
+
+x = lb[None][..., ::-1].transpose(0, 3, 1, 2)       <span class="cmt"># batch, BGR→RGB, BCHW</span>
+x = torch.from_numpy(np.ascontiguousarray(x)).float() / 255
+print(x.shape, x.min().item(), x.max().item())      <span class="cmt"># torch.Size([1, 3, 640, 480]) 0.0 1.0</span>
+print(x.numel())                                    <span class="cmt"># 921600</span></code></pre>
+    ลองเปลี่ยนเป็น <code>LetterBox(640)</code> (auto=False) แล้วดูว่า shape เปลี่ยนเป็นอะไร และลองรัน <code>python tools/verify_letterbox.py</code> เพื่อเทียบตัวเลขกับซิมมูเลชั่น 1.2
+  </details>
+
+  <!-- ===================== 5. อยู่ตรงไหน ===================== -->
+  <h2>🔗 อยู่ตรงไหนใน YOLO11-seg</h2>
+  <div id="pipe"></div>
+  <p>
+    บทนี้อยู่ที่ <strong>ต้นทางสุด</strong> ของ pipeline ได้แก่การเปลี่ยนไฟล์ภาพเป็น tensor <code>(1, 3, H, W)</code> ค่า 0–1 ด้วย letterbox
+    และอยู่ที่ <strong>ปลายทางสุด</strong> ด้วย เพราะกล่องและ mask ที่โมเดลทำนายบนภาพ letterbox ต้องถูก "ย้อน letterbox" กลับไปเป็นพิกัดบนภาพจริง
+    ทุกอย่างระหว่างสองจุดนี้ (Backbone → NMS) คือการคำนวณกับ tensor ที่ได้จากบทนี้
+  </p>
+
+  <!-- ===================== 6. สรุป ===================== -->
+  <h2>สรุปท้ายบท</h2>
+  <ul>
+    <li>ภาพสีคือตัวเลข 3 ตัวต่อพิกเซล (R, G, B) แต่ละตัวมีค่า 0–255 (uint8) ภาพ 640×640 มี 1,228,800 ตัวเลข</li>
+    <li>Tensor ภาพมีสองรูปแบบ: HWC <code>(H, W, 3)</code> ของไฟล์ภาพ/OpenCV และ CHW <code>(3, H, W)</code> ของ PyTorch โดยเขียน <em>สูง</em> ก่อน <em>กว้าง</em> เสมอ</li>
+    <li>หลายภาพซ้อนเป็น batch <code>(N, C, H, W)</code> ซึ่งต้องมีขนาดภาพเท่ากัน</li>
+    <li>OpenCV อ่านเป็น BGR ส่วน Ultralytics กลับเป็น RGB ด้วย <code>im[..., ::-1]</code></li>
+    <li>Normalization ของ Ultralytics คือหาร 255 อย่างเดียว ได้ float 0.0–1.0 (และไม่ทำให้ถ้าอินพุตเป็น tensor อยู่แล้ว)</li>
+    <li>Letterbox ย่อด้วย r = min(640/H, 640/W) ทั้งสองแกน แล้วเติมขอบเทา 114 แบ่งครึ่งสองฝั่ง วัตถุจึงไม่บิดสัดส่วน</li>
+    <li><code>model.predict()</code> กับไฟล์ .pt ใช้ auto=True เติมขอบแค่ให้หาร 32 ลงตัว (1280×720 → 640×384) และพิกัดผลลัพธ์ย้อนกลับด้วย (x − pad)/r</li>
+  </ul>
+
+  <!-- ===================== 7. แบบทดสอบ ===================== -->
+  <h2>แบบทดสอบท้ายบท</h2>
+  <p class="small muted">กดเลือกคำตอบเพื่อดูเฉลยและคำอธิบายทันที</p>
+  <div id="quiz"></div>
+
+  <!-- ===================== 8. อ้างอิง ===================== -->
+  <h2>เอกสารอ้างอิง</h2>
+  <ul class="refs">
+    <li>Goodfellow, I., Bengio, Y., &amp; Courville, A. (2016). <em>Deep learning</em>. MIT Press. https://www.deeplearningbook.org</li>
+    <li>Jocher, G., &amp; Qiu, J. (2024). <em>Ultralytics YOLO11</em> [Computer software]. Ultralytics. https://github.com/ultralytics/ultralytics</li>
+    <li>Ultralytics. (n.d.). <em>Ultralytics YOLO docs</em>. https://docs.ultralytics.com</li>
+    <li>Zhang, A., Lipton, Z. C., Li, M., &amp; Smola, A. J. (2023). <em>Dive into deep learning</em>. Cambridge University Press. https://d2l.ai</li>
+  </ul>
+
+  <footer>
+    ตัวเลขและโค้ดในบทนี้ตรวจกับ <strong>ultralytics 8.4.2</strong> (อ่าน source ของ <code>data/augment.py</code>, <code>engine/predictor.py</code>, <code>engine/model.py</code>, <code>utils/ops.py</code> และรัน <code>tools/verify_letterbox.py</code>)
+    · <a href="../">← สารบัญ</a> · บทถัดไป: นิวรอนและฟังก์ชันกระตุ้น (ยังไม่สร้าง)
+  </footer>
+</main>
+
+<script src="../assets/common.js"></script>
+<script>
+/* =========================================================
+   ซิม 1.1 ส่องพิกเซล
+   ========================================================= */
+(function () {
+  const root = document.getElementById('sim11');
+  const main = document.getElementById('pxMain'), mctx = main.getContext('2d');
+  const zoom = document.getElementById('pxZoom'), zctx = zoom.getContext('2d');
+  const out = document.getElementById('pxOut');
+  const N = 320, Z = 8, CELL = 40;
+  const src = makeFruitImage(N, N);
+  const data = src.getContext('2d').getImageData(0, 0, N, N).data;
+  // ภาพแยกช่อง (ขาวดำ) เตรียมไว้ล่วงหน้า
+  const chanImg = [0, 1, 2].map(c => {
+    const im = new ImageData(N, N);
+    for (let i = 0; i < N * N; i++) {
+      const v = data[i * 4 + c];
+      im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = v; im.data[i * 4 + 3] = 255;
+    }
+    return im;
+  });
+  const { X, Y, L } = sceneFrame(N, N);
+  const a1 = FRUITS.find(f => f.id === 'apple1');
+  const start = { x: Math.round(X(a1.cx) - L(a1.r) * 0.3), y: Math.round(Y(a1.cy) - L(a1.r) * 0.3) };
+  let st;
+
+  const px = (x, y) => { const i = (y * N + x) * 4; return [data[i], data[i + 1], data[i + 2]]; };
+  const f3 = v => (v / 255).toFixed(3);
+
+  function draw() {
+    if (st.ch === 'rgb') mctx.drawImage(src, 0, 0); else mctx.putImageData(chanImg[st.ch], 0, 0);
+    const x0 = Math.min(Math.max(st.x - Z / 2, 0), N - Z), y0 = Math.min(Math.max(st.y - Z / 2, 0), N - Z);
+    mctx.lineWidth = 2; mctx.strokeStyle = '#fff'; mctx.strokeRect(x0 - 2, y0 - 2, Z + 4, Z + 4);
+    mctx.strokeStyle = '#000'; mctx.strokeRect(x0 - 1, y0 - 1, Z + 2, Z + 2);
+
+    zctx.clearRect(0, 0, 320, 320);
+    zctx.textAlign = 'center'; zctx.textBaseline = 'middle';
+    for (let j = 0; j < Z; j++) for (let i = 0; i < Z; i++) {
+      const [r, g, b] = px(x0 + i, y0 + j);
+      const shown = st.ch === 'rgb' ? [r, g, b] : [[r, g, b][st.ch]];
+      const fill = st.ch === 'rgb' ? `rgb(${r},${g},${b})` : `rgb(${shown[0]},${shown[0]},${shown[0]})`;
+      zctx.fillStyle = fill; zctx.fillRect(i * CELL, j * CELL, CELL, CELL);
+      const lum = st.ch === 'rgb' ? 0.299 * r + 0.587 * g + 0.114 * b : shown[0];
+      zctx.fillStyle = lum > 140 ? '#000' : '#fff';
+      const fmt = v => st.scale === 255 ? v : (v / 255).toFixed(2);
+      if (shown.length === 3) {
+        zctx.font = '10px Consolas, monospace';
+        shown.forEach((v, k) => zctx.fillText(fmt(v), i * CELL + CELL / 2, j * CELL + 9 + k * 11));
+      } else {
+        zctx.font = '12px Consolas, monospace';
+        zctx.fillText(fmt(shown[0]), i * CELL + CELL / 2, j * CELL + CELL / 2);
+      }
+    }
+    zctx.strokeStyle = 'rgba(0,0,0,0.15)'; zctx.lineWidth = 1;
+    for (let k = 1; k < Z; k++) {
+      zctx.beginPath(); zctx.moveTo(k * CELL, 0); zctx.lineTo(k * CELL, 320); zctx.stroke();
+      zctx.beginPath(); zctx.moveTo(0, k * CELL); zctx.lineTo(320, k * CELL); zctx.stroke();
+    }
+    // พิกเซลที่ชี้อยู่
+    zctx.lineWidth = 3; zctx.strokeStyle = '#ff00ff';
+    zctx.strokeRect((st.x - x0) * CELL + 1.5, (st.y - y0) * CELL + 1.5, CELL - 3, CELL - 3);
+
+    const [r, g, b] = px(st.x, st.y);
+    out.innerHTML =
+      `พิกเซลที่เลือก (กรอบชมพู): x = <b>${st.x}</b>, y = <b>${st.y}</b> &nbsp; ภาพนี้ขนาด ${N}×${N}<br>` +
+      `ค่า 0–255: <span class="ch-r">R=${r}</span> <span class="ch-g">G=${g}</span> <span class="ch-b">B=${b}</span>` +
+      ` &nbsp;→ หลังหาร 255: <span class="ch-r">${f3(r)}</span> <span class="ch-g">${f3(g)}</span> <span class="ch-b">${f3(b)}</span><br>` +
+      `<span class="mono">HWC: img[${st.y}, ${st.x}] = [${r}, ${g}, ${b}]</span><br>` +
+      `<span class="mono">CHW: t[:, ${st.y}, ${st.x}] = [${r}, ${g}, ${b}]</span> <span class="small muted">(แถว y มาก่อนคอลัมน์ x)</span>`;
+  }
+
+  function setBtns() {
+    root.querySelectorAll('[data-ch]').forEach(b => b.classList.toggle('on', b.dataset.ch === String(st.ch)));
+    root.querySelectorAll('[data-scale]').forEach(b => b.classList.toggle('on', Number(b.dataset.scale) === st.scale));
+  }
+  function reset() { st = { ch: 'rgb', scale: 255, x: start.x, y: start.y, locked: false }; setBtns(); draw(); }
+
+  function pick(e, lock) {
+    const rect = main.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / rect.width * N);
+    const y = Math.floor((e.clientY - rect.top) / rect.height * N);
+    if (x < 0 || y < 0 || x >= N || y >= N) return;
+    if (lock) st.locked = true;
+    st.x = x; st.y = y; draw();
+  }
+  main.addEventListener('pointermove', e => { if (e.pointerType === 'mouse' && !st.locked) pick(e, false); });
+  main.addEventListener('pointerdown', e => { st.locked = false; pick(e, true); });
+  main.addEventListener('pointerleave', () => { st.locked = false; });
+  root.querySelectorAll('[data-ch]').forEach(b => b.addEventListener('click', () => {
+    st.ch = b.dataset.ch === 'rgb' ? 'rgb' : Number(b.dataset.ch); setBtns(); draw();
+  }));
+  root.querySelectorAll('[data-scale]').forEach(b => b.addEventListener('click', () => {
+    st.scale = Number(b.dataset.scale); setBtns(); draw();
+  }));
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 1.3 HWC กับ CHW
+   ========================================================= */
+(function () {
+  const root = document.getElementById('sim13');
+  const H = 4, W = 4;
+  // สุ่มตัวอย่างพิกเซล 4×4 จากภาพผลไม้ (ตรงบริเวณแอปเปิล/ส้ม/องุ่น)
+  const src = makeFruitImage(320, 320).getContext('2d');
+  const pts = [[100, 150], [175, 165], [228, 110], [235, 185], [110, 205], [150, 215], [200, 200], [250, 200],
+               [60, 250], [150, 250], [230, 230], [290, 245], [40, 40], [160, 40], [270, 60], [160, 300]];
+  const img = pts.map(([x, y]) => Array.from(src.getImageData(x, y, 1, 1).data.slice(0, 3)));
+  const grid = document.getElementById('hwcGrid'), info = document.getElementById('hwcInfo');
+  const memH = document.getElementById('memHWC'), memC = document.getElementById('memCHW');
+  const tint = ['#fdecea', '#e8f6ed', '#e9effb'], edge = ['#d6453d', '#2f9e55', '#3b6fd6'], cn = ['R', 'G', 'B'];
+  let sel;
+
+  const cells = img.map((rgb, k) => {
+    const d = document.createElement('div');
+    d.style.cssText = `width:48px;height:48px;cursor:pointer;background:rgb(${rgb});border:3px solid transparent`;
+    d.title = `y=${Math.floor(k / W)}, x=${k % W}`;
+    d.addEventListener('click', () => { sel = { y: Math.floor(k / W), x: k % W }; draw(); });
+    grid.appendChild(d);
+    return d;
+  });
+  function chip(v, c, y, x) {
+    const s = document.createElement('span');
+    s.className = 'mono';
+    s.textContent = v;
+    s.style.cssText = `min-width:34px;text-align:center;padding:1px 2px;border-radius:3px;cursor:pointer;background:${tint[c]};border:2px solid transparent;font-size:12px`;
+    s.addEventListener('click', () => { sel = { y, x }; draw(); });
+    s.dataset.c = c; s.dataset.y = y; s.dataset.x = x;
+    return s;
+  }
+  // HWC: ลำดับ y → x → c
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) for (let c = 0; c < 3; c++) memH.appendChild(chip(img[y * W + x][c], c, y, x));
+  // CHW: ลำดับ c → y → x
+  for (let c = 0; c < 3; c++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) memC.appendChild(chip(img[y * W + x][c], c, y, x));
+
+  function draw() {
+    cells.forEach((d, k) => d.style.borderColor = (Math.floor(k / W) === sel.y && k % W === sel.x) ? '#ff00ff' : 'transparent');
+    for (const s of [...memH.children, ...memC.children]) {
+      const on = +s.dataset.y === sel.y && +s.dataset.x === sel.x;
+      s.style.borderColor = on ? edge[s.dataset.c] : 'transparent';
+      s.style.fontWeight = on ? '700' : '400';
+      s.style.opacity = on ? '1' : '0.55';
+    }
+    const { y, x } = sel, v = img[y * W + x];
+    const iH = c => (y * W + x) * 3 + c, iC = c => c * H * W + y * W + x;
+    info.innerHTML =
+      `พิกเซล y=${y}, x=${x} ค่า RGB = [${v.join(', ')}]<br>` +
+      `<b>HWC</b> shape (4, 4, 3): ตำแหน่งในหน่วยความจำ = (y·W + x)·3 + c<br>` +
+      `&nbsp;→ R ที่ ${iH(0)}, G ที่ ${iH(1)}, B ที่ ${iH(2)} <span class="muted">(ติดกัน)</span><br>` +
+      `<b>CHW</b> shape (3, 4, 4): ตำแหน่ง = c·H·W + y·W + x<br>` +
+      `&nbsp;→ R ที่ ${iC(0)}, G ที่ ${iC(1)}, B ที่ ${iC(2)} <span class="muted">(ห่างกันทีละ 16)</span><br>` +
+      `เพิ่มมิติ batch → (1, 3, 4, 4) ตำแหน่งไม่เปลี่ยน เพราะมีภาพเดียว`;
+  }
+  root.querySelector('[data-act=reset]').addEventListener('click', () => { sel = { y: 0, x: 0 }; draw(); });
+  sel = { y: 1, x: 2 }; draw();
+})();
+
+/* =========================================================
+   ซิม 1.2 Letterbox
+   ========================================================= */
+(function () {
+  const root = document.getElementById('sim12');
+  const srcC = document.getElementById('lbSrc'), sctx = srcC.getContext('2d');
+  const dstC = document.getElementById('lbDst'), dctx = dstC.getContext('2d');
+  const wIn = document.getElementById('lbW'), hIn = document.getElementById('lbH');
+  const out = document.getElementById('lbOut'), mapOut = document.getElementById('lbMap');
+  const BOX = 300, S1 = BOX / 640;     // ฝั่งขวา: 640 พิกเซล = 300 px บนจอ
+  let st, lb, geo;
+
+  function compute() {
+    lb = letterbox(st.w, st.h, st.mode);
+    // ตำแหน่งภาพผลลัพธ์บน canvas ขวา (จัดกึ่งกลางกรอบ 640)
+    const offX = (640 - lb.outW) / 2, offY = (640 - lb.outH) / 2;
+    // ฝั่งซ้าย: ย่อภาพต้นฉบับให้พอดีกล่อง
+    const s0 = Math.min((BOX - 20) / st.w, (BOX - 20) / st.h);
+    geo = { offX, offY, s0, sx0: (BOX - st.w * s0) / 2, sy0: (BOX - st.h * s0) / 2 };
+  }
+
+  function draw() {
+    compute();
+    const { offX, offY, s0, sx0, sy0 } = geo;
+    // ----- ต้นฉบับ -----
+    sctx.clearRect(0, 0, BOX, BOX);
+    sctx.save(); sctx.translate(sx0, sy0); sctx.scale(s0, s0);
+    drawFruitBasket(sctx, st.w, st.h); sctx.restore();
+    sctx.strokeStyle = '#333'; sctx.lineWidth = 1; sctx.strokeRect(sx0 + 0.5, sy0 + 0.5, st.w * s0 - 1, st.h * s0 - 1);
+    document.getElementById('lbSrcLabel').textContent = `${st.w}×${st.h}  →  shape (${st.h}, ${st.w}, 3)`;
+
+    // ----- สิ่งที่เข้าโมเดล -----
+    dctx.clearRect(0, 0, BOX, BOX);
+    dctx.fillStyle = '#f6f4ef'; dctx.fillRect(0, 0, BOX, BOX);
+    dctx.fillStyle = 'rgb(114,114,114)';
+    dctx.fillRect(offX * S1, offY * S1, lb.outW * S1, lb.outH * S1);
+    dctx.save();
+    dctx.translate((offX + lb.left) * S1, (offY + lb.top) * S1);
+    dctx.scale(lb.newW / st.w * S1, lb.newH / st.h * S1);
+    dctx.beginPath(); dctx.rect(0, 0, st.w, st.h); dctx.clip();
+    drawFruitBasket(dctx, st.w, st.h);
+    dctx.restore();
+    dctx.setLineDash([5, 4]); dctx.strokeStyle = '#555'; dctx.lineWidth = 1;
+    dctx.strokeRect(0.5, 0.5, BOX - 1, BOX - 1); dctx.setLineDash([]);
+    // ป้าย pad
+    dctx.fillStyle = '#fff'; dctx.font = 'bold 12px Sarabun, sans-serif'; dctx.textAlign = 'center'; dctx.textBaseline = 'middle';
+    const cx = BOX / 2, cy = BOX / 2;
+    if (lb.top * S1 >= 14) {
+      dctx.fillText(`pad บน ${lb.top}`, cx, (offY + lb.top / 2) * S1);
+      dctx.fillText(`pad ล่าง ${lb.bottom}`, cx, (offY + lb.outH - lb.bottom / 2) * S1);
+    }
+    if (lb.left * S1 >= 34) {
+      dctx.save(); dctx.translate((offX + lb.left / 2) * S1, cy); dctx.rotate(-Math.PI / 2); dctx.fillText(`pad ซ้าย ${lb.left}`, 0, 0); dctx.restore();
+      dctx.save(); dctx.translate((offX + lb.outW - lb.right / 2) * S1, cy); dctx.rotate(-Math.PI / 2); dctx.fillText(`pad ขวา ${lb.right}`, 0, 0); dctx.restore();
+    }
+    // จุดที่คลิก
+    if (st.pt) {
+      const p = st.pt;
+      mark(dctx, (offX + p.x) * S1, (offY + p.y) * S1);
+      if (p.inside) mark(sctx, sx0 + p.x0 * s0, sy0 + p.y0 * s0);
+    }
+
+    // ----- ตัวเลข -----
+    const f = v => Number.isInteger(v) ? v : v.toFixed(4);
+    const pctGray = 100 * (1 - (lb.newW * lb.newH) / (lb.outW * lb.outH));
+    let html =
+      `r = min(640/H, 640/W) = min(640/${st.h}, 640/${st.w}) = min(${(640 / st.h).toFixed(4)}, ${(640 / st.w).toFixed(4)}) = <b>${lb.r.toFixed(4)}</b><br>`;
+    if (st.mode === 'stretch') {
+      html += `ยืดตรง ๆ: rx = 640/${st.w} = <b>${lb.rx.toFixed(4)}</b>, ry = 640/${st.h} = <b>${lb.ry.toFixed(4)}</b> ` +
+        (Math.abs(lb.rx - lb.ry) > 1e-9 ? `→ แนวนอนถูกปรับเป็น ${(lb.rx / lb.ry).toFixed(2)} เท่าของแนวตั้ง <b>ภาพบิดสัดส่วน</b>` : '→ เท่ากัน (ภาพจัตุรัสอยู่แล้ว)') + '<br>';
+    } else {
+      html += `ขนาดหลังย่อ = round(${st.w}×${lb.r.toFixed(4)}) × round(${st.h}×${lb.r.toFixed(4)}) = <b>${lb.newW} × ${lb.newH}</b><br>` +
+        `ส่วนที่ขาด: dw = 640 − ${lb.newW} = ${lb.dwFull}, dh = 640 − ${lb.newH} = ${lb.dhFull}<br>`;
+      if (st.mode === 'auto') html += `auto=True: dw mod 32 = ${lb.dwFull % 32}, dh mod 32 = ${lb.dhFull % 32}<br>`;
+      html += `pad บน/ล่าง = <b>${lb.top} / ${lb.bottom}</b>, ซ้าย/ขวา = <b>${lb.left} / ${lb.right}</b><br>`;
+    }
+    html += `ภาพที่เข้าโมเดล = <b>${lb.outW} × ${lb.outH}</b> → tensor <span class="mono">(1, 3, ${lb.outH}, ${lb.outW})</span> = ${(3 * lb.outW * lb.outH).toLocaleString()} ตัวเลข` +
+      (st.mode === 'stretch' ? '' : ` · พื้นที่เป็นขอบเทา ${pctGray.toFixed(1)}%`) +
+      `<br>หารด้วย 32 ลงตัว? กว้าง ${lb.outW % 32 === 0 ? '✔' : '✘'} สูง ${lb.outH % 32 === 0 ? '✔' : '✘'}`;
+    out.innerHTML = html;
+
+    if (!st.pt) mapOut.innerHTML = '<span class="muted">คลิกหรือแตะบนภาพด้านขวาเพื่อย้อนพิกัดกลับไปภาพต้นฉบับ</span>';
+    else if (!st.pt.inside) mapOut.innerHTML = `จุด (${st.pt.x}, ${st.pt.y}) อยู่บน <b>ขอบเทา</b> ไม่มีพิกเซลนี้ในภาพจริง (ผลทำนายที่ตกตรงนี้จะถูกตัดด้วย clip_boxes)`;
+    else {
+      const p = st.pt;
+      mapOut.innerHTML = st.mode === 'stretch'
+        ? `จุด (${p.x}, ${p.y}) บนภาพที่เข้าโมเดล → ต้นฉบับ: x = ${p.x}/${lb.rx.toFixed(4)} = <b>${p.x0.toFixed(1)}</b>, y = ${p.y}/${lb.ry.toFixed(4)} = <b>${p.y0.toFixed(1)}</b>`
+        : `จุด (${p.x}, ${p.y}) บนภาพที่เข้าโมเดล → ต้นฉบับ: x = (${p.x} − ${lb.left}) / ${lb.r.toFixed(4)} = <b>${p.x0.toFixed(1)}</b>, ` +
+          `y = (${p.y} − ${lb.top}) / ${lb.r.toFixed(4)} = <b>${p.y0.toFixed(1)}</b>`;
+    }
+  }
+
+  function mark(ctx, x, y) {
+    ctx.save();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - 10, y); ctx.lineTo(x + 10, y); ctx.moveTo(x, y - 10); ctx.lineTo(x, y + 10); ctx.stroke();
+    ctx.restore();
+  }
+
+  dstC.addEventListener('pointerdown', e => {
+    const rect = dstC.getBoundingClientRect();
+    const cx = (e.clientX - rect.left) / rect.width * BOX, cy = (e.clientY - rect.top) / rect.height * BOX;
+    const x = Math.round(cx / S1 - geo.offX), y = Math.round(cy / S1 - geo.offY);
+    if (x < 0 || y < 0 || x >= lb.outW || y >= lb.outH) return;
+    const inside = x >= lb.left && x < lb.left + lb.newW && y >= lb.top && y < lb.top + lb.newH;
+    const x0 = st.mode === 'stretch' ? x / lb.rx : (x - lb.left) / lb.r;
+    const y0 = st.mode === 'stretch' ? y / lb.ry : (y - lb.top) / lb.r;
+    st.pt = { x, y, x0, y0, inside };
+    draw();
+  });
+
+  function sync() {
+    wIn.value = st.w; hIn.value = st.h;
+    document.getElementById('lbWv').textContent = st.w;
+    document.getElementById('lbHv').textContent = st.h;
+    root.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === st.mode));
+    root.querySelectorAll('[data-wh]').forEach(b => b.classList.toggle('on', b.dataset.wh === `${st.w},${st.h}`));
+  }
+  function set(patch) { Object.assign(st, patch, { pt: null }); sync(); draw(); }
+  root.querySelectorAll('[data-wh]').forEach(b => b.addEventListener('click', () => {
+    const [w, h] = b.dataset.wh.split(',').map(Number); set({ w, h });
+  }));
+  root.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => set({ mode: b.dataset.mode })));
+  wIn.addEventListener('input', () => set({ w: Number(wIn.value) }));
+  hIn.addEventListener('input', () => set({ h: Number(hIn.value) }));
+  const reset = () => { st = { w: 1280, h: 720, mode: 'square', pt: null }; sync(); draw(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   🔗 และแบบทดสอบ
+   ========================================================= */
+renderPipeline(document.getElementById('pipe'), ['image', 'letterbox', 'mask']);
+
+initQuiz(document.getElementById('quiz'), [
+  {
+    q: 'ภาพสี RGB ขนาด 640×640 เมื่อเป็น tensor แบบ PyTorch (ยังไม่มีมิติ batch) มี shape เท่าใด',
+    options: ['(640, 640, 3)', '(3, 640, 640)', '(640, 640)', '(1, 640, 640)'],
+    answer: 1,
+    explain: 'PyTorch ใช้ลำดับ CHW คือช่องสีก่อน แล้วจึงสูงและกว้าง (640, 640, 3) เป็นแบบ HWC ของ OpenCV/NumPy',
+  },
+  {
+    q: 'ภาพสี RGB ขนาด 640×640 มีตัวเลขทั้งหมดกี่ตัว',
+    options: ['409,600', '1,228,800', '640', '1,920'],
+    answer: 1,
+    explain: '640 × 640 × 3 = 1,228,800 ตัวเลข ส่วน 409,600 คือจำนวนพิกเซล (หรือจำนวนตัวเลขของภาพขาวดำช่องเดียว)',
+  },
+  {
+    q: 'พิกเซลที่มีค่า R=255, G=128, B=0 หลังผ่าน preprocessing ของ Ultralytics จะมีค่าเท่าใด',
+    options: ['(1.0, 0.502, 0.0)', '(255, 128, 0) เพราะไม่ต้อง normalize', '(0.0, 0.502, 1.0) เพราะ OpenCV เป็น BGR', '(0.5, 0.25, 0.0)'],
+    answer: 0,
+    explain: 'Ultralytics หารด้วย 255 อย่างเดียว: 255/255 = 1.0, 128/255 ≈ 0.502, 0/255 = 0 และลำดับถูกกลับเป็น RGB ไว้แล้วก่อนเข้าโมเดล',
+  },
+  {
+    q: 'เหตุผลหลักที่ไม่ยืดภาพ 1280×720 ให้เป็น 640×640 ตรง ๆ คืออะไร',
+    options: ['การยืดภาพช้ากว่า letterbox', 'วัตถุจะผิดสัดส่วน รูปทรงต่างจากที่โมเดลเคยเห็นตอนเทรน', 'การยืดภาพทำให้สีเปลี่ยน', 'ยืดแล้ว shape จะไม่เป็น 640×640'],
+    answer: 1,
+    explain: 'การยืดใช้อัตราส่วนแนวนอน (0.5) กับแนวตั้ง (0.889) ไม่เท่ากัน วัตถุกลมจึงกลายเป็นวงรี letterbox ใช้ r ค่าเดียวทั้งสองแกนเพื่อคงรูปทรง',
+  },
+  {
+    q: 'ภาพ 1280×720 ผ่าน letterbox แบบ 640×640 (auto=False) จะมี pad บน/ล่างเท่าใด',
+    options: ['140 / 140', '280 / 0', '80 / 80', '12 / 12'],
+    answer: 0,
+    explain: 'r = 0.5 → ย่อเป็น 640×360, dh = 640 − 360 = 280 แบ่งครึ่งได้ 140/140 ส่วน 12/12 เป็นผลของโหมด auto=True',
+  },
+  {
+    q: 'เรียก YOLO("yolo11n-seg.pt").predict() กับภาพ 1280×720 หนึ่งภาพ tensor ที่เข้าโมเดลมี shape เท่าใด',
+    options: ['(1, 3, 640, 640)', '(1, 3, 384, 640)', '(1, 3, 720, 1280)', '(1, 640, 384, 3)'],
+    answer: 1,
+    explain: 'predict ตั้ง rect=True และโมเดลเป็น .pt จึงใช้ auto=True: dh = 280 mod 32 = 24 → pad 12/12 → สูง 384 กว้าง 640 และเขียนสูงก่อนกว้างในแบบ (N, C, H, W) ยืนยันได้จาก log "at shape (1, 3, 384, 640)"',
+  },
+  {
+    q: 'บรรทัด im = im[..., ::-1] ใน predictor.preprocess ทำหน้าที่อะไร',
+    options: ['กลับภาพซ้าย-ขวา (flip)', 'แปลงลำดับช่องสีจาก BGR เป็น RGB', 'แปลง HWC เป็น CHW', 'normalize ให้เป็น 0–1'],
+    answer: 1,
+    explain: '... หมายถึงทุกมิติก่อนหน้า ส่วน ::-1 กลับลำดับเฉพาะมิติสุดท้าย ซึ่งในแบบ BHWC คือมิติช่องสี จึงเปลี่ยน B,G,R เป็น R,G,B ส่วนการเปลี่ยน HWC เป็น CHW ทำด้วย transpose ในบรรทัดถัดไป',
+  },
+  {
+    q: 'ภาพต้นฉบับ 1280×720 ผ่าน letterbox 640×640 (r = 0.5, pad บน 140, ซ้าย 0) โมเดลทำนายจุด (320, 200) บนภาพที่เข้าโมเดล จุดนี้อยู่ที่ใดบนภาพต้นฉบับ',
+    options: ['(640, 120)', '(640, 400)', '(160, 100)', '(320, 60)'],
+    answer: 0,
+    explain: 'x = (320 − 0)/0.5 = 640, y = (200 − 140)/0.5 = 120 ต้องลบขอบเทาออกก่อนแล้วจึงหารด้วย r ถ้าลืมลบขอบจะได้ (640, 400) ซึ่งผิด',
+  },
+]);
+</script>
+</body>
+</html>

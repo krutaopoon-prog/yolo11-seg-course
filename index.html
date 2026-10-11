@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>เข้าใจ YOLO11-seg ตั้งแต่ศูนย์</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<main>
+  <h1>เข้าใจ YOLO11-seg ตั้งแต่ศูนย์</h1>
+  <p class="muted">Understanding YOLO11 Instance Segmentation from Scratch — ตั้งแต่ตัวเลขในภาพจนถึง mask ของวัตถุแต่ละชิ้น</p>
+
+  <div id="pipe"></div>
+  <p class="small muted">ผังด้านบนคือเส้นทางทั้งหมดที่ภาพหนึ่งภาพเดินผ่าน ทุกบทจะชี้ว่าเนื้อหาของบทนั้นอยู่ตรงไหนบนผังนี้</p>
+
+  <ul class="toc">
+    <li class="unit">หน่วยที่ 1 พื้นฐานการเรียนรู้ของเครื่อง</li>
+    <li><a href="chapter1/">บทที่ 1 ภาพดิจิทัลคือตัวเลข</a></li>
+    <li class="soon">บทที่ 2 นิวรอนและฟังก์ชันกระตุ้น</li>
+    <li class="soon">บทที่ 3 Loss และ Gradient Descent</li>
+    <li class="soon">บทที่ 4 การเทรนเครือข่าย: Backpropagation และ Overfitting</li>
+    <li class="unit">หน่วยที่ 2 CNN</li>
+    <li class="soon">บทที่ 5 Convolution</li>
+    <li class="soon">บทที่ 6 จาก Convolution สู่ CNN ทั้งเครือข่าย</li>
+    <li class="unit">หน่วยที่ 3 Object Detection</li>
+    <li class="soon">บทที่ 7 Bounding Box, IoU และ NMS</li>
+    <li class="soon">บทที่ 8 การวัดผล: Precision, Recall, mAP</li>
+    <li class="unit">หน่วยที่ 4 YOLO11-seg</li>
+    <li class="soon">บทที่ 9 สถาปัตยกรรม YOLO11: Backbone, Neck, Head</li>
+    <li class="soon">บทที่ 10 Segmentation Head: Prototype × Coefficient</li>
+    <li class="soon">บทที่ 11 การเทรน: Label Assignment, Loss และการอ่านผล</li>
+    <li class="soon">บทที่ 12 ไล่ภาพหนึ่งภาพผ่านทั้งระบบ และทบทวนรวบยอด</li>
+  </ul>
+  <p class="small muted">บทสีเทายังไม่ได้สร้าง จะสร้างทีละบทหลังจากอ่านบทก่อนหน้าเข้าใจแล้ว</p>
+</main>
+<script src="assets/common.js"></script>
+<script>renderPipeline(document.getElementById('pipe'), []);</script>
+</body>
+</html>
