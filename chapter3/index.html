@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>บทที่ 3 Loss และ Gradient Descent | เข้าใจ YOLO11-seg</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+  <p class="topnav"><a href="../">← สารบัญ</a> · หน่วยที่ 1 พื้นฐานการเรียนรู้ของเครื่อง</p>
+  <h1>บทที่ 3 Loss และ Gradient Descent</h1>
+  <p class="muted">โมเดล "เรียนรู้" ได้อย่างไร: วัดว่าผิดแค่ไหน แล้วเดินลงเขาทีละก้าว</p>
+
+  <!-- ===================== 1. วัตถุประสงค์ ===================== -->
+  <div class="box info">
+    <span class="box-title">🎯 วัตถุประสงค์การเรียนรู้</span>
+    เมื่อจบบทนี้ คุณควรทำสิ่งต่อไปนี้ได้
+    <ol>
+      <li>อธิบายได้ว่า loss คือตัวเลขที่บอกว่าโมเดลผิดมากแค่ไหน และคำนวณ MSE ของข้อมูลชุดเล็ก ๆ ได้</li>
+      <li>อธิบายได้ว่าทำไม BCE ลงโทษคำตอบที่ "ผิดแบบมั่นใจ" หนักมาก</li>
+      <li>อธิบาย gradient ว่าเป็นทิศที่ loss เพิ่มเร็วที่สุด และคำนวณการปรับค่า w ← w − η·∂L/∂w หนึ่งก้าวได้</li>
+      <li>อธิบายผลของ learning rate ที่เล็กไป พอดี และใหญ่ไปได้</li>
+      <li>อธิบายแนวคิดของ SGD, Momentum, Adam/AdamW และบอกได้ว่า YOLO11 เลือก optimizer อย่างไร</li>
+    </ol>
+  </div>
+
+  <!-- ===================== 2. ทบทวน ===================== -->
+  <h2>ทบทวนความรู้เดิม</h2>
+  <p>
+    ในซิม 2.1 คุณปรับ w₁, w₂, b <em>ด้วยมือ</em> จนเส้นแบ่งแยกแอปเปิลแดงออกจากแอปเปิลเขียวได้ ซึ่งมีตัวเลขให้ปรับแค่ 3 ตัว
+    แต่ yolo11n-seg มี weight และ bias <strong>2,876,848 ตัว</strong> ปรับด้วยมือไม่ได้แน่นอน
+    คอมพิวเตอร์จึงต้องมีของสองอย่าง
+    อย่างแรกคือ <strong>ตัวเลขตัวเดียวที่บอกว่าตอนนี้ผิดมากแค่ไหน</strong> เรียกว่า loss
+    อย่างที่สองคือ <strong>วิธีรู้ว่าควรขยับตัวเลขแต่ละตัวไปทางไหน</strong> ซึ่งได้จาก gradient
+    ตอนท้ายบท คุณจะได้เห็นนิวรอนจากบทที่ 2 ปรับ w₁, w₂, b เองโดยไม่ต้องแตะ slider เลย
+  </p>
+
+  <!-- ===================== 3. เนื้อหา ===================== -->
+  <h2>3.1 Loss: ตัวเลขตัวเดียวที่บอกว่าผิดแค่ไหน</h2>
+  <p>
+    <strong>ฟังก์ชันสูญเสีย (loss function)</strong> รับคำทำนายของโมเดลกับคำตอบจริง (เฉลย) แล้วให้ตัวเลขหนึ่งตัว
+    ตัวเลขยิ่งน้อยแปลว่าทำนายยิ่งใกล้เฉลย ถ้าเท่ากับ 0 แปลว่าตรงทุกข้อ
+    เป้าหมายของการเทรนจึงมีข้อเดียวคือ <strong>ทำให้ loss ต่ำที่สุด</strong>
+  </p>
+
+  <h3>MSE: สำหรับทำนาย "ตัวเลข"</h3>
+  <p>
+    เมื่อคำตอบเป็นตัวเลขต่อเนื่อง (งาน regression) เช่น ความกว้างของกล่องรอบวัตถุ ค่าที่นิยมใช้คือ
+    <strong>Mean Squared Error (MSE)</strong> ซึ่งคำนวณ 3 ขั้น: หาความคลาดเคลื่อน (ทำนาย − จริง), ยกกำลังสอง, แล้วเฉลี่ย
+  </p>
+  <pre><code>MSE = ( e₁² + e₂² + … + eₙ² ) / n        โดย eᵢ = ทำนายᵢ − จริงᵢ</code></pre>
+  <p>
+    ตัวอย่าง: ทำนาย 2, 4, 5 แต่ค่าจริงคือ 3, 2, 5 → ความคลาดเคลื่อน −1, 2, 0 → ยกกำลังสอง 1, 4, 0 → MSE = 5/3 ≈ 1.67
+  </p>
+  <p>
+    ที่ต้องยกกำลังสองมีเหตุผลสองข้อ ข้อแรก ค่าลบกับค่าบวกจะได้ไม่หักล้างกัน (−1 กับ +1 ไม่กลายเป็น "ผิด 0")
+    ข้อสอง ความผิดก้อนใหญ่ถูกลงโทษหนักกว่า ผิด 2 ได้ 4 แต่ผิด 1 ได้แค่ 1
+    ในเชิงภาพ e² ก็คือ <strong>พื้นที่ของสี่เหลี่ยมจัตุรัส</strong> ที่มีด้านยาวเท่ากับความคลาดเคลื่อน ลองดูในซิมด้านล่าง
+  </p>
+
+  <!-- ---------- ซิม 3.1 ---------- -->
+  <div class="sim" id="s31">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 3.1 ฟิตเส้นตรงด้วยมือ และแผนที่ของ loss</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองปรับความชัน (m) และจุดตัดแกน (c) ให้สี่เหลี่ยมสีแดงเล็กที่สุด แล้วสังเกตว่าจุดชมพูบนแผนที่ด้านขวาขยับเข้าใกล้ ★ หรือไม่</p>
+    <div class="controls">
+      <label>m (ความชัน) <input type="range" id="s31_m" min="-1" max="3" step="0.01"> <span class="mono" id="s31_mv"></span></label>
+      <label>c (จุดตัดแกน) <input type="range" id="s31_c" min="-3" max="5" step="0.01"> <span class="mono" id="s31_cv"></span></label>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col" style="flex-basis:360px">
+        <p class="small" style="margin:0"><strong>ข้อมูลและเส้น y = m·x + c</strong></p>
+        <canvas id="s31_fit" width="400" height="300" style="width:100%"></canvas>
+      </div>
+      <div class="sim-col" style="flex-basis:260px">
+        <p class="small" style="margin:0"><strong>แผนที่ loss</strong> (แต่ละจุดคือเส้นหนึ่งเส้น สีเข้ม = MSE ต่ำ) คลิกเพื่อเลือก m, c</p>
+        <canvas id="s31_map" width="300" height="300" style="width:100%;max-width:300px;cursor:crosshair"></canvas>
+      </div>
+    </div>
+    <div class="sim-out" id="s31_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>MSE คือ <em>พื้นที่เฉลี่ย</em> ของสี่เหลี่ยมสีแดง จุดที่อยู่ห่างเส้นมากสร้างสี่เหลี่ยมใหญ่มาก (ระยะ 2 เท่า พื้นที่ 4 เท่า) เส้นจึงถูกดึงเข้าหาจุดที่อยู่ไกลก่อน</li>
+        <li>เส้นแต่ละเส้นคือจุด <em>หนึ่งจุด</em> บนแผนที่ (m, c) การหาเส้นที่ดีที่สุดจึงเท่ากับการหา "ก้นหุบ" ที่ลึกที่สุดของแผนที่นี้ (★)</li>
+        <li>หุบมีรูปทรงรีและเอียง ขยับ m นิดเดียว loss เปลี่ยนมาก แต่ต้องขยับ c มากกว่าจึงจะเห็นผล ข้อนี้สำคัญในหัวข้อ 3.4</li>
+        <li>ในโมเดลจริง แผนที่มีมิติเท่ากับจำนวน parameter (เกือบ 3 ล้านมิติสำหรับ yolo11n-seg) วาดไม่ได้ แต่หลักการเหมือนกันทุกอย่าง</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>BCE: สำหรับทำนาย "ใช่หรือไม่ใช่"</h3>
+  <p>
+    เมื่อคำตอบเป็นใช่ (y = 1) หรือไม่ใช่ (y = 0) และโมเดลตอบเป็นความมั่นใจ p ระหว่าง 0–1 (เช่นผลจาก sigmoid ในบทที่ 2)
+    ค่าที่ใช้คือ <strong>Binary Cross-Entropy (BCE)</strong>
+  </p>
+  <pre><code>ถ้าเฉลยคือ "ใช่"  (y = 1):  L = −ln(p)
+ถ้าเฉลยคือ "ไม่ใช่" (y = 0):  L = −ln(1 − p)</code></pre>
+  <p>
+    ไม่ต้องจำสูตร ให้ดูรูปกราฟแทน ถ้าเฉลยคือ "ใช่" แล้วโมเดลตอบ p = 0.9 จะได้ loss แค่ 0.11
+    ตอบ 0.5 (ไม่แน่ใจ) ได้ 0.69 แต่ถ้าตอบ 0.01 (มั่นใจว่าไม่ใช่ ซึ่งผิด) จะได้ถึง 4.61
+    <strong>BCE ลงโทษความ "มั่นใจแต่ผิด" หนักมาก</strong> โมเดลจึงเรียนรู้ที่จะไม่มั่นใจเกินเหตุ
+  </p>
+
+  <div class="sim" id="bce">
+    <div class="sim-head"><h3>รูปที่ 3.1 (ลองเลื่อนได้) กราฟของ BCE</h3></div>
+    <canvas id="bce_cv" width="560" height="230" style="width:100%"></canvas>
+    <div class="controls"><label>ความมั่นใจว่า "ใช่" p <input type="range" id="bce_p" min="0.01" max="0.99" step="0.01" value="0.9" style="width:240px"> <span class="mono" id="bce_pv"></span></label></div>
+    <div class="sim-out" id="bce_out"></div>
+  </div>
+
+  <div class="box tip">
+    <span class="box-title">💡 ใน YOLO11-seg</span>
+    YOLO11-seg ใช้ loss ทั้งสองแบบ งานทำนาย <em>ตัวเลข</em> เช่น ตำแหน่งกล่อง ใช้ loss เชิงระยะ (box loss แบบ CIoU และ DFL เรียนในบทที่ 10–11)
+    ส่วนงาน "<em>วัตถุนี้เป็นคลาสนี้หรือไม่</em>" ใช้ <strong>BCE</strong> (ใน source ใช้ <code>nn.BCEWithLogitsLoss</code> ซึ่งรวม sigmoid กับ BCE ไว้ในคำสั่งเดียว)
+    ทุกส่วนถูกรวมเป็น loss ตัวเดียวแบบถ่วงน้ำหนัก ค่าเริ่มต้นคือ box × 7.5, seg × 7.5, cls × 0.5, dfl × 1.5
+  </div>
+
+  <h2>3.2 Gradient: พื้นเอียงไปทางไหน</h2>
+  <p>
+    ลองนึกภาพว่าคุณยืนอยู่บนภูเขาในหมอกหนา มองไม่เห็นหุบเขาเลย เห็นแค่ว่า <strong>พื้นใต้เท้าเอียงไปทางไหน</strong>
+    ถ้าอยากลงไปจุดต่ำสุด ทางที่สมเหตุสมผลที่สุดคือก้าวไปทางที่พื้นลาดลง แล้วดูพื้นใหม่ แล้วก้าวอีก ทำซ้ำไปเรื่อย ๆ
+    นี่คือ <strong>Gradient Descent</strong> โดยภูเขาคือแผนที่ loss และตำแหน่งที่ยืนคือค่า weight ปัจจุบัน
+  </p>
+  <ul>
+    <li><strong>ความชัน (slope)</strong> หรืออนุพันธ์ ∂L/∂w บอกว่า "ถ้าขยับ w ไปทางขวานิดหนึ่ง loss จะเพิ่มขึ้นหรือลดลง และเร็วแค่ไหน" ถ้าความชันเป็นบวก แปลว่าขยับขวาแล้ว loss เพิ่ม จึงควรขยับซ้าย</li>
+    <li>เมื่อมี parameter หลายตัว นำความชันของแต่ละตัวมาเรียงกันเป็นเวกเตอร์ เรียกว่า <strong>gradient</strong> ซึ่งชี้ไปทางที่ loss <em>เพิ่มขึ้นเร็วที่สุด</em> (ขึ้นเขา)</li>
+    <li>เราจึงเดิน <strong>สวนทาง</strong> gradient โดยขนาดก้าวคูณด้วย <strong>learning rate (η)</strong></li>
+  </ul>
+  <pre><code>w_ใหม่ = w − η × ∂L/∂w</code></pre>
+  <p>
+    ตัวอย่าง: w = 3, ความชัน ∂L/∂w = 2, η = 0.1 → w ใหม่ = 3 − 0.1 × 2 = <strong>2.8</strong>
+    ความชันเป็นบวก w จึงลดลง ถ้าความชันเป็น −2 จะได้ w ใหม่ = 3.2
+  </p>
+  <p class="small muted">
+    คอมพิวเตอร์หาความชันของ weight ทั้ง 2.9 ล้านตัวได้พร้อมกันในการคำนวณรอบเดียว ด้วยวิธีที่เรียกว่า backpropagation ซึ่งจะเรียนในบทที่ 4
+  </p>
+
+  <!-- ---------- ซิม 3.2 ---------- -->
+  <div class="sim" id="s32">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 3.2 ลูกบอลกลิ้งลงหุบ</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">แบบหุบเดียว: ลองกด "เดินอัตโนมัติ" ด้วย η = 0.1, 0.5, 1.0, 1.5 และ 2.1 แล้วสังเกตว่าลูกบอลลู่เข้า แกว่ง หรือกระเด็นออก จากนั้นสลับเป็นแบบสองหุบแล้วดูว่าลูกบอลตกหุบไหน</p>
+    <div class="controls">
+      ภูมิประเทศ:
+      <button data-land="one">หุบเดียว</button>
+      <button data-land="two">สองหุบ (ตื้นกับลึก)</button>
+    </div>
+    <div class="controls">
+      <label>learning rate η <input type="range" id="s32_lr" min="0.01" max="2.5" step="0.01"> <span class="mono" id="s32_lrv"></span></label>
+      <label><input type="checkbox" id="s32_mom"> ใส่ Momentum (μ = 0.9)</label>
+    </div>
+    <div class="controls">
+      <button id="s32_step">ก้าว 1 ครั้ง</button>
+      <button id="s32_auto">▶ เดินอัตโนมัติ</button>
+      <span class="small muted">คลิกบนกราฟเพื่อวางลูกบอลจุดเริ่มต้นใหม่</span>
+    </div>
+    <canvas id="s32_cv" width="640" height="320" style="width:100%;cursor:pointer"></canvas>
+    <div class="sim-out" id="s32_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li><strong>หุบเดียว</strong>: หุบนี้ออกแบบให้ทุกก้าว "ระยะห่างจากก้นหุบ" ถูกคูณด้วย (1 − η) พอดี จึงเห็นทุกกรณีชัดเจน
+          <ul>
+            <li>η = 0.1: เหลือ 0.9 เท่าทุกก้าว ลู่เข้าช้า ใช้ราว 80 ก้าว</li>
+            <li>η = 0.5: ระยะหายไปครึ่งหนึ่งทุกก้าว เร็วขึ้นมาก</li>
+            <li>η = 1.0: ถึงก้นหุบในก้าวเดียว</li>
+            <li>η = 1.5: คูณ −0.5 เลยก้นหุบไปอีกฝั่งแล้ววกกลับ แกว่งไปมาแต่แคบลงจนลู่เข้า</li>
+            <li>η = 2.0: คูณ −1 แกว่งอยู่กับที่ตลอดไป</li>
+            <li>η &gt; 2: แต่ละก้าวกระโดดไกลขึ้นเรื่อย ๆ จนกระเด็นออก</li>
+          </ul>
+        </li>
+        <li>ขนาดก้าวคือ η × ความชัน ตรงที่ชันมากจึงก้าวยาว และพอใกล้ก้นหุบซึ่งเกือบราบ ก้าวก็สั้นลงเอง</li>
+        <li><strong>สองหุบ</strong> (ค่าเริ่มต้น η = 0.05 เริ่มที่ w = 3.6): ลูกบอลตกลง <strong>หุบตื้นด้านขวา</strong> แล้วหยุดในราว 70 ก้าว เพราะที่ก้นหุบความชันเป็น 0 จึงไม่รู้ว่ามีหุบที่ลึกกว่าอยู่ทางซ้าย อาการนี้เรียกว่าติด <em>จุดต่ำสุดเฉพาะที่ (local minimum)</em> แต่ถ้าคลิกเริ่มทางซ้าย จะลงหุบลึกทันที</li>
+        <li>สองหุบ + เปิด Momentum (เริ่มที่จุดเดิม): ลูกบอลสะสม "แรงเฉื่อย" จนกลิ้งข้ามเนินไปตกหุบที่ลึกกว่า ส่วนถ้าใช้ η ใหญ่ (0.7 ขึ้นไป) ในแบบสองหุบ ลูกบอลจะกระโดดไปมาระหว่างหุบแบบคาดเดาไม่ได้</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>3.3 Learning rate: ขนาดก้าวคือทุกอย่าง</h2>
+  <p>
+    learning rate เป็นค่าที่ <em>คนตั้ง</em> ไม่ได้เรียนรู้เอง ค่าแบบนี้เรียกว่า <strong>ไฮเปอร์พารามิเตอร์ (hyperparameter)</strong>
+    ซิม 3.2 แสดงให้เห็นแล้วว่ามันกำหนดว่าการเทรนจะสำเร็จหรือพัง
+  </p>
+  <div class="table-wrap">
+  <table>
+    <tr><th>η</th><th>สิ่งที่เห็น</th><th>อาการบนกราฟ loss ตอนเทรนจริง</th></tr>
+    <tr><td>เล็กไป</td><td>ก้าวสั้น ลงหุบช้ามาก</td><td>loss ลดลงช้า ๆ เกือบเป็นเส้นตรง เทรนจนจบก็ยังไม่ต่ำพอ</td></tr>
+    <tr><td>พอดี</td><td>ลงหุบเร็วแล้วนิ่ง</td><td>loss ลดลงเร็วช่วงแรก แล้วค่อย ๆ ราบลง</td></tr>
+    <tr><td>ใหญ่ไป</td><td>กระโดดข้ามก้นหุบไปมา</td><td>loss แกว่งขึ้นลง ไม่ลงต่ำสุด</td></tr>
+    <tr><td>ใหญ่มาก</td><td>กระเด็นออก</td><td>loss พุ่งขึ้นจนเป็น <code>nan</code> (ตัวเลขพัง)</td></tr>
+  </table>
+  </div>
+  <p>
+    ในทางปฏิบัติ จึงมักเริ่มด้วย η ปานกลาง แล้วค่อย ๆ ลดลงเมื่อใกล้ก้นหุบ (learning rate schedule) และช่วงแรกสุดจะค่อย ๆ เพิ่มจากค่าน้อย ๆ (warmup)
+    YOLO11 ทำทั้งสองอย่าง ซึ่งจะดูรายละเอียดในบทที่ 11
+  </p>
+
+  <h2>3.4 Optimizer: วิธีก้าวที่ฉลาดขึ้น</h2>
+  <p>
+    สูตร w − η·∂L/∂w เป็นแบบพื้นฐานที่สุด ยังมีวิธีปรับปรุงการก้าวให้ดีขึ้นอีกหลายแบบ แต่ละแบบเรียกว่า <strong>optimizer</strong>
+  </p>
+  <ul>
+    <li><strong>SGD (Stochastic Gradient Descent)</strong> คือสูตรพื้นฐาน คำว่า stochastic (สุ่ม) หมายความว่าแต่ละก้าวคำนวณความชันจากข้อมูลเพียงกลุ่มเล็ก ๆ (batch) ไม่ใช่ทั้งชุด จึงเร็วแต่ทิศมีความแกว่งเล็กน้อย (บทที่ 4)</li>
+    <li><strong>Momentum</strong> ใส่ "แรงเฉื่อย" ให้ก้าว โดยนำทิศของก้าวก่อน ๆ มาสะสม ทิศที่ชี้ไปทางเดิมสม่ำเสมอจะเร่งขึ้น ส่วนทิศที่สลับไปมา (ซิกแซก) จะหักล้างกันเอง</li>
+    <li><strong>Adam</strong> ปรับขนาดก้าวของ <em>แต่ละ parameter แยกกัน</em> parameter ที่ความชันใหญ่สม่ำเสมอจะถูกย่อก้าวลง ส่วนที่ความชันเล็กจะถูกขยายก้าว ทุกตัวจึงเดินได้พอ ๆ กันแม้หุบจะรีและเอียง (และมี momentum ในตัว)</li>
+    <li><strong>AdamW</strong> คือ Adam ที่แยกการทำ <em>weight decay</em> (ดึง weight ให้เข้าใกล้ 0 ทีละนิดเพื่อไม่ให้โตเกินไป) ออกมาจากการคำนวณก้าว ทำให้ได้ผลดีกว่าเดิม</li>
+  </ul>
+  <p>ซิมด้านล่างใช้แผนที่ loss เดียวกับซิม 3.1 แต่ให้คอมพิวเตอร์เป็นคนเดินแทนคุณ</p>
+
+  <!-- ---------- ซิม 3.3 ---------- -->
+  <div class="sim" id="s33">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 3.3 ให้คอมพิวเตอร์หาเส้นเอง</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "เดินอัตโนมัติ" ด้วย SGD แล้วดูเส้นทางบนแผนที่ จากนั้นรีเซ็ตและลอง Momentum กับ Adam แล้วสังเกตว่าแบบไหนถึง ★ ได้ในจำนวนก้าวน้อยที่สุด</p>
+    <div class="controls">
+      optimizer:
+      <button data-opt="sgd">SGD</button>
+      <button data-opt="mom">Momentum</button>
+      <button data-opt="adam">Adam</button>
+    </div>
+    <div class="controls">
+      <label>learning rate η <input type="range" id="s33_lr" min="0.005" max="0.25" step="0.005"> <span class="mono" id="s33_lrv"></span></label>
+      <button id="s33_step">ก้าว 1 ครั้ง</button>
+      <button id="s33_auto">▶ เดินอัตโนมัติ</button>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col" style="flex-basis:360px">
+        <canvas id="s33_fit" width="400" height="300" style="width:100%"></canvas>
+      </div>
+      <div class="sim-col" style="flex-basis:260px">
+        <p class="small" style="margin:0">แผนที่ loss: <span style="color:#d6453d">ลูกศรแดง = gradient (ขึ้นเขา)</span> · <span style="color:#1f5fbf">ลูกศรน้ำเงิน = ทิศลงเร็วที่สุด</span> · คลิกเพื่อเปลี่ยนจุดเริ่ม</p>
+        <canvas id="s33_map" width="300" height="300" style="width:100%;max-width:300px;cursor:crosshair"></canvas>
+      </div>
+    </div>
+    <p class="small" style="margin:6px 0 0"><strong>loss ตามจำนวนก้าว</strong> (แกนตั้งแบบลอการิทึม)</p>
+    <canvas id="s33_loss" width="640" height="150" style="width:100%"></canvas>
+    <div class="sim-out" id="s33_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>SGD: ลูกศรน้ำเงินไม่ได้ชี้ไปที่ ★ ตรง ๆ แต่ชี้ลงหน้าผาที่ชันที่สุด เส้นทางจึงพุ่งลงหุบก่อน แล้วค่อย ๆ คืบไปตามท้องหุบที่เกือบราบ ใช้หลายร้อยก้าว</li>
+        <li>SGD กับ η = 0.2 ขึ้นไป: เส้นทางกระโดดข้ามหุบไปมาแล้วกระเด็นออก เหมือนลูกบอลในซิม 3.2</li>
+        <li>Momentum: ความเร็วสะสมตามท้องหุบ จึงถึง ★ เร็วกว่ามาก แต่อาจเลยไปแล้ววกกลับ</li>
+        <li>Adam: ก้าวของ m และ c มีขนาดพอ ๆ กันตั้งแต่แรก แม้หุบจะรีมาก จึงเดินค่อนข้างตรงไปยัง ★</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>3.5 ปิดท้าย: นิวรอนในบทที่ 2 เรียนรู้เอง</h2>
+  <p>
+    ตอนนี้มีครบทุกชิ้นแล้ว ได้แก่ นิวรอน (บทที่ 2), BCE ที่วัดว่าทำนายผิดแค่ไหน และ gradient descent ที่บอกว่าควรปรับ w₁, w₂, b ไปทางไหน
+    ซิมด้านล่างเริ่มจากเส้นแบ่งเดียวกับค่าเริ่มต้นของซิม 2.1 แต่คราวนี้คอมพิวเตอร์ปรับเอง
+  </p>
+
+  <!-- ---------- ซิม 3.4 ---------- -->
+  <div class="sim" id="s34">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 3.4 นิวรอนเรียนแยกพิกเซลผลไม้ด้วยตัวเอง</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "เทรนอัตโนมัติ" แล้วดูเส้นแบ่งหมุนเข้าที่เอง สังเกตว่าจุดที่ทำนายผิด (จุดใหญ่) ค่อย ๆ หดลง จากนั้นสลับเป็นโจทย์ "ส้ม" แล้วดูว่า loss ลงถึงศูนย์หรือไม่</p>
+    <div class="controls">
+      โจทย์:
+      <button data-ds="A">แอปเปิลแดง vs แอปเปิลเขียว</button>
+      <button data-ds="B">ส้ม vs (แอปเปิลแดง + กล้วย)</button>
+    </div>
+    <div class="controls">
+      optimizer:
+      <button data-opt34="mom">Momentum</button>
+      <button data-opt34="sgd">SGD</button>
+      <label>learning rate η <input type="range" id="s34_lr" min="0.5" max="30" step="0.5"> <span class="mono" id="s34_lrv"></span></label>
+      <button id="s34_step">ปรับ 1 ครั้ง</button>
+      <button id="s34_auto">▶ เทรนอัตโนมัติ</button>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col">
+        <canvas id="s34_plane" width="360" height="360" style="width:100%;max-width:360px"></canvas>
+      </div>
+      <div class="sim-col">
+        <div class="sim-out" id="s34_out"></div>
+        <p class="small" style="margin:8px 0 2px"><strong>BCE เฉลี่ยตามจำนวนครั้งที่ปรับ</strong></p>
+        <canvas id="s34_loss" width="320" height="150" style="width:100%;max-width:340px"></canvas>
+      </div>
+    </div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>ขนาดของจุดแต่ละจุดเท่ากับ BCE ของพิกเซลนั้น จุดที่ทำนายผิดแบบมั่นใจจึงใหญ่ที่สุด และเป็นตัวที่ "ดึง" เส้นแรงที่สุด</li>
+        <li>โจทย์แอปเปิล: พอแยกได้ครบแล้ว เส้นแทบไม่ขยับ แต่ w₁, w₂, b ยังโตขึ้นเรื่อย ๆ เพราะการคูณ w ให้ใหญ่ขึ้นทำให้มั่นใจขึ้นและ BCE ลดลงอีก (สีพื้นหลังคมขึ้น) weight decay ใน AdamW และ YOLO11 มีไว้ยั้งอาการนี้</li>
+        <li>โจทย์ส้ม (Momentum): loss ลดลงแล้วค้างที่ประมาณ 0.59 ทำนายถูกราว 49 จาก 70 ไม่ถึง 70/70 เพราะนิวรอนเดียวสร้างได้แค่เส้นตรงเส้นเดียว (บทที่ 2) gradient descent หาจุดที่ดีที่สุดเท่าที่โครงสร้างจะทำได้ แต่ทำเกินขีดจำกัดของโครงสร้างไม่ได้</li>
+        <li>สังเกตว่า 49/70 น้อยกว่าเส้นที่ดีที่สุดที่หาได้ด้วยมือ (56/70) ด้วยซ้ำ เพราะ gradient descent ทำให้ <em>BCE</em> ต่ำที่สุด ไม่ได้นับจำนวนข้อที่ถูกโดยตรง สิ่งที่ถูก optimize คือ loss เสมอ</li>
+        <li>โจทย์ส้มแล้วสลับเป็น SGD: ต้องใช้ราว 13,000 ครั้งกว่าจะถึงจุดเดียวกัน (Momentum ใช้ราว 1,000 ครั้ง และซิมนี้หยุดที่ 4,000 ครั้ง) เพราะค่า R ของทุกจุดเกือบเท่ากัน (0.75–0.98) หุบของ loss จึงรีและยาวมาก เหมือนที่เห็นในซิม 3.3</li>
+        <li>ลอง η = 30 กับโจทย์ส้ม การปรับแต่ละครั้งกระโดดไกลเกินไป เส้นสะบัดไปมาและ loss ขึ้นลงไม่นิ่ง</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>3.6 ใน YOLO11 จริง</h2>
+  <p>ตรวจจาก source และจากการเทรนจริงบน <code>coco8-seg</code> 2 epoch (ultralytics 8.4.2) ได้ข้อเท็จจริงดังนี้</p>
+  <ul>
+    <li><strong>loss ที่บันทึกทุก epoch</strong> อยู่ในไฟล์ <code>results.csv</code> มี 5 คอลัมน์ฝั่งเทรน: <code>train/box_loss</code>, <code>train/seg_loss</code>, <code>train/cls_loss</code>, <code>train/dfl_loss</code> และ <code>train/sem_loss</code>
+      (สำหรับ yolo11-seg คอลัมน์ sem_loss เป็น 0 เสมอ เพราะใช้กับโมเดลที่มีสาขา semantic segmentation เท่านั้น) และมีชุดเดียวกันฝั่ง <code>val/</code></li>
+    <li><strong>ค่าเริ่มต้น</strong> <code>lr0 = 0.01</code>, <code>momentum = 0.937</code>, <code>weight_decay = 0.0005</code>, <code>optimizer = auto</code></li>
+    <li><strong>แต่เมื่อ optimizer = auto</strong> Ultralytics จะ <em>ไม่ใช้</em> lr0 และ momentum ที่ตั้งไว้ แล้วเลือกเองตามจำนวนก้าวทั้งหมดของการเทรน
+      <div class="table-wrap">
+      <table>
+        <tr><th>จำนวนก้าว = ⌈จำนวนภาพ / max(batch, 64)⌉ × epochs</th><th>optimizer ที่เลือก</th><th>learning rate</th></tr>
+        <tr><td>มากกว่า 10,000 (ชุดข้อมูลใหญ่)</td><td>SGD (momentum 0.9, Nesterov)</td><td>0.01</td></tr>
+        <tr><td>ไม่เกิน 10,000 (ชุดข้อมูลเล็ก)</td><td>MuSGD (momentum 0.9)</td><td>0.002 × 5 / (4 + จำนวนคลาส)</td></tr>
+      </table>
+      </div>
+      ตอนเทรน coco8-seg (80 คลาส) log พิมพ์ว่า <code>MuSGD(lr=0.000119, momentum=0.9)</code> ซึ่งตรงกับ 0.01 / 84 = 0.000119
+    </li>
+    <li><strong>MuSGD</strong> เป็น optimizer ใหม่ใน Ultralytics ที่ผสมการอัปเดตแบบ SGD with momentum เข้ากับวิธีชื่อ Muon แนวคิดหลักยังเป็น "สะสมทิศ (momentum) แล้วก้าวสวนทาง gradient" เหมือนในบทนี้ รายละเอียดของ Muon อยู่นอกขอบเขตรายวิชา</li>
+    <li><strong>weight decay</strong> ใช้กับ weight ทั่วไปเท่านั้น ไม่ใช้กับ bias และ weight ของ BatchNorm (เห็นในโค้ดที่แบ่ง parameter เป็นกลุ่ม)</li>
+  </ul>
+
+  <!-- ===================== 5. อยู่ตรงไหน ===================== -->
+  <h2>🔗 อยู่ตรงไหนใน YOLO11-seg</h2>
+  <div id="pipe"></div>
+  <p>
+    loss และ gradient descent ไม่ได้อยู่บนเส้นทางตอน <em>ทำนาย</em> แต่อยู่ในวงจร <em>เทรน</em>
+    ตอนเทรน เอาต์พุตของ Head ถูกนำไปเทียบกับเฉลยเพื่อคำนวณ loss (box, seg, cls, dfl) แล้ว gradient ไหลย้อนกลับไปปรับ weight ทุกตัวใน Backbone, Neck และ Head (บทที่ 4)
+    ค่าที่คุณกำหนดตอนสั่งเทรน เช่น <code>lr0</code> และ <code>optimizer</code> คือขนาดก้าวและวิธีก้าวในบทนี้ และตัวเลข loss ที่ Ultralytics พิมพ์ทุก epoch ก็คือความสูงของจุดที่โมเดลยืนอยู่บนแผนที่ loss
+  </p>
+
+  <!-- ===================== 6. สรุป ===================== -->
+  <h2>สรุปท้ายบท</h2>
+  <ul>
+    <li>Loss คือตัวเลขตัวเดียวที่บอกว่าทำนายผิดแค่ไหน การเทรนคือการทำให้ loss ต่ำที่สุด</li>
+    <li>MSE = ค่าเฉลี่ยของ (ทำนาย − จริง)² ใช้กับการทำนายตัวเลข ส่วน BCE = −ln(p) หรือ −ln(1 − p) ใช้กับใช่/ไม่ใช่ และลงโทษความมั่นใจที่ผิดหนักมาก</li>
+    <li>Gradient คือเวกเตอร์ของความชันที่ชี้ไปทางที่ loss เพิ่มเร็วที่สุด จึงปรับด้วย w ← w − η·∂L/∂w</li>
+    <li>Learning rate เล็กไปทำให้ช้า ใหญ่ไปทำให้แกว่งหรือพัง และ gradient descent อาจติดหุบตื้น (local minimum)</li>
+    <li>Momentum สะสมแรงเฉื่อย ส่วน Adam ปรับขนาดก้าวแยกตาม parameter และ AdamW แยก weight decay ออกมา</li>
+    <li>YOLO11 ใช้ BCE กับคลาส และเมื่อ optimizer = auto จะเลือก SGD (lr 0.01) สำหรับการเทรนยาว หรือ MuSGD (lr = 0.01/(4 + nc)) สำหรับการเทรนสั้น โดยไม่ใช้ lr0 ที่ตั้งไว้</li>
+  </ul>
+
+  <!-- ===================== 7. แบบทดสอบ ===================== -->
+  <h2>แบบทดสอบท้ายบท</h2>
+  <p class="small muted">กดเลือกคำตอบเพื่อดูเฉลยและคำอธิบายทันที</p>
+  <div id="quiz"></div>
+
+  <!-- ===================== 8. อ้างอิง ===================== -->
+  <h2>เอกสารอ้างอิง</h2>
+  <ul class="refs">
+    <li>Goodfellow, I., Bengio, Y., &amp; Courville, A. (2016). <em>Deep learning</em>. MIT Press. https://www.deeplearningbook.org</li>
+    <li>Jocher, G., &amp; Qiu, J. (2024). <em>Ultralytics YOLO11</em> [Computer software]. Ultralytics. https://github.com/ultralytics/ultralytics</li>
+    <li>Kingma, D. P., &amp; Ba, J. (2015). Adam: A method for stochastic optimization. In <em>3rd International Conference on Learning Representations</em>. https://doi.org/10.48550/arXiv.1412.6980</li>
+    <li>Loshchilov, I., &amp; Hutter, F. (2019). Decoupled weight decay regularization. In <em>7th International Conference on Learning Representations</em>. https://doi.org/10.48550/arXiv.1711.05101</li>
+    <li>Rumelhart, D. E., Hinton, G. E., &amp; Williams, R. J. (1986). Learning representations by back-propagating errors. <em>Nature, 323</em>(6088), 533–536. https://doi.org/10.1038/323533a0</li>
+    <li>Sanderson, G. (2017). <em>Neural networks</em> [Video series]. 3Blue1Brown. https://www.3blue1brown.com/topics/neural-networks</li>
+  </ul>
+
+  <footer>
+    ข้อเท็จจริงของ YOLO11 ในบทนี้ตรวจกับ <strong>ultralytics 8.4.2</strong>: อ่าน source <code>cfg/default.yaml</code>, <code>engine/trainer.py</code> (build_optimizer), <code>utils/loss.py</code>, <code>optim/muon.py</code>
+    และเทรน <code>yolo11n-seg.pt</code> บน <code>coco8-seg</code> 2 epoch เพื่อดู log และ results.csv จริง
+    · <a href="../chapter2/">← บทที่ 2</a> · <a href="../">สารบัญ</a> · บทถัดไป: การเทรนเครือข่าย: Backpropagation และ Overfitting (ยังไม่สร้าง)
+  </footer>
+</main>
+
+<script src="../assets/common.js"></script>
+<script>
+const f2 = (v, n = 2) => (Math.abs(v) < 5e-10 ? 0 : v).toFixed(n);
+const $ = id => document.getElementById(id);
+
+function arrow(ctx, x0, y0, x1, y1, color, w = 2.5) {
+  const an = Math.atan2(y1 - y0, x1 - x0);
+  ctx.save(); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = w;
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - 9 * Math.cos(an - 0.4), y1 - 9 * Math.sin(an - 0.4));
+  ctx.lineTo(x1 - 9 * Math.cos(an + 0.4), y1 - 9 * Math.sin(an + 0.4)); ctx.fill();
+  ctx.restore();
+}
+
+// กราฟ loss ตามจำนวนก้าว (แกนตั้ง log)
+function drawLossChart(cv, hist, label) {
+  const { ctx, W, H } = setupCanvas(cv);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  const L = 44, B = 18, T = 8, R = 8;
+  ctx.strokeStyle = '#999'; ctx.lineWidth = 1; ctx.strokeRect(L, T, W - L - R, H - T - B);
+  if (hist.length < 1) return;
+  const vals = hist.map(v => Math.max(v, 1e-6));
+  let lo = Math.log10(Math.min(...vals)), hi = Math.log10(Math.max(...vals));
+  if (hi - lo < 0.5) { lo -= 0.25; hi += 0.25; }
+  const n = Math.max(hist.length - 1, 10);
+  const sx = i => L + i / n * (W - L - R), sy = v => T + (hi - Math.log10(Math.max(v, 1e-6))) / (hi - lo) * (H - T - B);
+  ctx.fillStyle = '#666'; ctx.font = '10px Consolas, monospace'; ctx.textAlign = 'right';
+  ctx.fillText(Math.pow(10, hi).toPrecision(2), L - 3, T + 8);
+  ctx.fillText(Math.pow(10, lo).toPrecision(2), L - 3, H - B);
+  ctx.textAlign = 'center'; ctx.fillText(`${hist.length - 1} ${label}`, W / 2, H - 4);
+  ctx.strokeStyle = '#b4441e'; ctx.lineWidth = 2; ctx.beginPath();
+  vals.forEach((v, i) => (i ? ctx.lineTo(sx(i), sy(v)) : ctx.moveTo(sx(i), sy(v))));
+  ctx.stroke();
+}
+
+/* =========================================================
+   ข้อมูลและแผนที่ loss สำหรับซิม 3.1 และ 3.3
+   ========================================================= */
+const FIT = (function () {
+  const r = rng(3), n = 10;
+  const xs = Array.from({ length: n }, (_, i) => 0.3 + 3.4 * i / (n - 1));
+  const ys = xs.map(x => 0.9 * x + 0.8 + (r() - 0.5) * 1.6);
+  const mse = (m, c) => xs.reduce((s, x, i) => s + (m * x + c - ys[i]) ** 2, 0) / n;
+  const grad = (m, c) => {
+    let gm = 0, gc = 0;
+    xs.forEach((x, i) => { const e = m * x + c - ys[i]; gm += 2 * e * x / n; gc += 2 * e / n; });
+    return [gm, gc];
+  };
+  // เส้นที่ดีที่สุด (สูตรปิด) ไว้วาง ★
+  const mx = xs.reduce((a, b) => a + b) / n, my = ys.reduce((a, b) => a + b) / n;
+  const best_m = xs.reduce((s, x, i) => s + (x - mx) * (ys[i] - my), 0) / xs.reduce((s, x) => s + (x - mx) ** 2, 0);
+  const best_c = my - best_m * mx;
+  const M = [-1, 3], C = [-3, 5], S = 300;
+  // วาดแผนที่ครั้งเดียวเก็บไว้
+  const map = document.createElement('canvas'); map.width = S; map.height = S;
+  const mctx = map.getContext('2d'), im = mctx.createImageData(S, S);
+  const lmin = Math.log(mse(best_m, best_c)), vals = new Float32Array(S * S);
+  let lmax = -Infinity;
+  for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+    const m = M[0] + (i + 0.5) / S * (M[1] - M[0]), c = C[1] - (j + 0.5) / S * (C[1] - C[0]);
+    const v = Math.log(mse(m, c)); vals[j * S + i] = v; if (v > lmax) lmax = v;
+  }
+  const band = v => Math.floor((v - lmin) / (lmax - lmin) * 14);
+  const lo = [31, 78, 140], mid = [140, 196, 222], hi = [253, 244, 225];
+  for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+    const b = band(vals[j * S + i]), t = b / 14;
+    const col = t < 0.5 ? lo.map((v, k) => v + (mid[k] - v) * t * 2) : mid.map((v, k) => v + (hi[k] - v) * (t - 0.5) * 2);
+    const edge = (i < S - 1 && band(vals[j * S + i + 1]) !== b) || (j < S - 1 && band(vals[(j + 1) * S + i]) !== b);
+    const p = (j * S + i) * 4;
+    im.data[p] = edge ? col[0] * 0.75 : col[0]; im.data[p + 1] = edge ? col[1] * 0.75 : col[1]; im.data[p + 2] = edge ? col[2] * 0.75 : col[2]; im.data[p + 3] = 255;
+  }
+  mctx.putImageData(im, 0, 0);
+  const toMap = (m, c) => [(m - M[0]) / (M[1] - M[0]) * S, (C[1] - c) / (C[1] - C[0]) * S];
+  const fromMap = (x, y) => [M[0] + x / S * (M[1] - M[0]), C[1] - y / S * (C[1] - C[0])];
+  return { xs, ys, n, mse, grad, best_m, best_c, map, S, M, C, toMap, fromMap };
+})();
+
+function drawFit(cv, m, c) {
+  const { ctx, W, H } = setupCanvas(cv);
+  const L = 34, R = 10, T = 10, B = 26;
+  const px = x => L + x / 4 * (W - L - R), py = y => T + (6 - y) / 7 * (H - T - B), unitY = (H - T - B) / 7;
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
+  for (let x = 0; x <= 4; x++) { ctx.beginPath(); ctx.moveTo(px(x), py(6)); ctx.lineTo(px(x), py(-1)); ctx.stroke(); }
+  for (let y = -1; y <= 6; y++) { ctx.beginPath(); ctx.moveTo(px(0), py(y)); ctx.lineTo(px(4), py(y)); ctx.stroke(); }
+  ctx.strokeStyle = '#999'; ctx.beginPath(); ctx.moveTo(px(0), py(0)); ctx.lineTo(px(4), py(0)); ctx.moveTo(px(0), py(-1)); ctx.lineTo(px(0), py(6)); ctx.stroke();
+  ctx.fillStyle = '#666'; ctx.font = '11px Sarabun, sans-serif'; ctx.textAlign = 'center';
+  for (let x = 0; x <= 4; x++) ctx.fillText(x, px(x), H - 12);
+  ctx.textAlign = 'right'; for (let y = 0; y <= 6; y += 2) ctx.fillText(y, L - 4, py(y) + 4);
+  ctx.textAlign = 'center'; ctx.fillText('x', px(4) - 6, H - 2);
+  ctx.save(); ctx.beginPath(); ctx.rect(L, T, W - L - R, H - T - B); ctx.clip();
+  // สี่เหลี่ยมความคลาดเคลื่อน
+  FIT.xs.forEach((x, i) => {
+    const y = FIT.ys[i], pred = m * x + c, e = pred - y, s = Math.abs(e) * unitY;
+    ctx.fillStyle = 'rgba(214,69,61,0.18)'; ctx.strokeStyle = 'rgba(214,69,61,0.7)'; ctx.lineWidth = 1;
+    ctx.fillRect(px(x), Math.min(py(y), py(pred)), s, s); ctx.strokeRect(px(x), Math.min(py(y), py(pred)), s, s);
+  });
+  // เส้น
+  ctx.strokeStyle = '#1f5fbf'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(px(0), py(c)); ctx.lineTo(px(4), py(m * 4 + c)); ctx.stroke();
+  // จุด
+  FIT.xs.forEach((x, i) => {
+    ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(px(x), py(FIT.ys[i]), 4.5, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.restore();
+}
+
+function drawMap(cv, m, c, path, showGrad) {
+  const { ctx, W } = setupCanvas(cv);
+  ctx.drawImage(FIT.map, 0, 0, W, W);
+  const k = W / FIT.S, P = (mm, cc) => FIT.toMap(mm, cc).map(v => v * k);
+  ctx.fillStyle = '#fff'; ctx.font = '11px Sarabun, sans-serif';
+  ctx.textAlign = 'center'; ctx.fillText('m →', W - 18, W - 6);
+  ctx.textAlign = 'left'; ctx.fillText('c ↑', 4, 12);
+  // ★
+  const [bx, by] = P(FIT.best_m, FIT.best_c);
+  ctx.fillStyle = '#ffd400'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.font = '20px sans-serif'; ctx.textAlign = 'center';
+  ctx.strokeText('★', bx, by + 7); ctx.fillText('★', bx, by + 7);
+  if (path && path.length > 1) {
+    ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 1.5; ctx.beginPath();
+    path.forEach(([pm, pc], i) => { const [x, y] = P(pm, pc); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke();
+    ctx.fillStyle = '#ff00ff';
+    path.forEach(([pm, pc], i) => { if (i % Math.max(1, Math.floor(path.length / 60)) === 0) { const [x, y] = P(pm, pc); ctx.fillRect(x - 1.5, y - 1.5, 3, 3); } });
+  }
+  const [x, y] = P(m, c);
+  if (showGrad) {
+    const [gm, gc] = FIT.grad(m, c);
+    const dx = gm / (FIT.M[1] - FIT.M[0]), dy = -gc / (FIT.C[1] - FIT.C[0]), len = Math.hypot(dx, dy);
+    if (len > 1e-9) {
+      arrow(ctx, x, y, x + dx / len * 34, y + dy / len * 34, '#d6453d');
+      arrow(ctx, x, y, x - dx / len * 34, y - dy / len * 34, '#1f5fbf');
+    }
+  }
+  ctx.fillStyle = '#ff00ff'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+}
+
+/* ---------- ซิม 3.1 ---------- */
+(function () {
+  const root = $('s31');
+  let st;
+  function draw() {
+    drawFit($('s31_fit'), st.m, st.c);
+    drawMap($('s31_map'), st.m, st.c, null, false);
+    $('s31_m').value = st.m; $('s31_c').value = st.c;
+    $('s31_mv').textContent = f2(st.m); $('s31_cv').textContent = f2(st.c);
+    const es = FIT.xs.map((x, i) => st.m * x + st.c - FIT.ys[i]);
+    const sum = es.reduce((s, e) => s + e * e, 0);
+    $('s31_out').innerHTML =
+      `ความคลาดเคลื่อนของ 10 จุด: <span class="mono small">${es.map(e => f2(e, 1)).join(', ')}</span><br>` +
+      `ผลรวมพื้นที่สี่เหลี่ยม Σe² = ${f2(sum)} → <b>MSE = ${f2(sum)} / 10 = ${f2(sum / 10, 3)}</b><br>` +
+      `<span class="muted">เส้นที่ดีที่สุด (★): m = ${f2(FIT.best_m)}, c = ${f2(FIT.best_c)}, MSE = ${f2(FIT.mse(FIT.best_m, FIT.best_c), 3)}</span>`;
+  }
+  $('s31_m').addEventListener('input', e => { st.m = +e.target.value; draw(); });
+  $('s31_c').addEventListener('input', e => { st.c = +e.target.value; draw(); });
+  const mapCv = $('s31_map');
+  let drag = false;
+  const pick = e => { const { W } = setupCanvas(mapCv); const [x, y] = canvasXY(mapCv, e, W, W); [st.m, st.c] = FIT.fromMap(x / W * FIT.S, y / W * FIT.S); draw(); };
+  mapCv.addEventListener('pointerdown', e => { drag = true; mapCv.setPointerCapture(e.pointerId); pick(e); });
+  mapCv.addEventListener('pointermove', e => { if (drag) pick(e); });
+  mapCv.addEventListener('pointerup', () => { drag = false; });
+  const reset = () => { st = { m: 0.2, c: 3.5 }; draw(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* ---------- รูปที่ 3.1 BCE ---------- */
+(function () {
+  const cv = $('bce_cv'), { ctx, W, H } = setupCanvas(cv);
+  const L = 40, R = 12, T = 10, B = 28, YM = 5;
+  const sx = p => L + p * (W - L - R), sy = v => T + (YM - Math.min(v, YM)) / YM * (H - T - B);
+  function draw() {
+    const p = +$('bce_p').value;
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#eee';
+    for (let v = 0; v <= YM; v++) { ctx.beginPath(); ctx.moveTo(L, sy(v)); ctx.lineTo(W - R, sy(v)); ctx.stroke(); }
+    ctx.strokeStyle = '#999'; ctx.strokeRect(L, T, W - L - R, H - T - B);
+    ctx.fillStyle = '#666'; ctx.font = '11px Sarabun, sans-serif'; ctx.textAlign = 'right';
+    for (let v = 0; v <= YM; v++) ctx.fillText(v, L - 5, sy(v) + 4);
+    ctx.textAlign = 'center';
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) ctx.fillText(t, sx(t), H - 14);
+    ctx.fillText('p = ความมั่นใจว่า "ใช่"', (L + W - R) / 2, H - 1);
+    const curve = (fn, color) => {
+      ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.beginPath();
+      for (let i = 1; i < 200; i++) { const q = i / 200; i > 1 ? ctx.lineTo(sx(q), sy(fn(q))) : ctx.moveTo(sx(q), sy(fn(q))); }
+      ctx.stroke();
+    };
+    curve(q => -Math.log(q), '#1f5fbf');
+    curve(q => -Math.log(1 - q), '#888');
+    const l1 = -Math.log(p), l0 = -Math.log(1 - p);
+    ctx.setLineDash([3, 3]); ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(sx(p), T); ctx.lineTo(sx(p), H - B); ctx.stroke(); ctx.setLineDash([]);
+    for (const [v, col] of [[l1, '#1f5fbf'], [l0, '#888']]) {
+      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(sx(p), sy(v), 5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.font = 'bold 12px Sarabun, sans-serif'; ctx.textAlign = 'left';
+    ctx.fillStyle = '#1f5fbf'; ctx.fillText('เฉลย "ใช่": −ln(p)', sx(0.03), sy(4.2));
+    ctx.fillStyle = '#777'; ctx.textAlign = 'right'; ctx.fillText('เฉลย "ไม่ใช่": −ln(1−p)', sx(0.97), sy(4.2));
+    $('bce_pv').textContent = p.toFixed(2);
+    $('bce_out').innerHTML =
+      `โมเดลตอบ p = ${p.toFixed(2)} → ถ้าเฉลยคือ "ใช่": <b style="color:#1f5fbf">loss = −ln(${p.toFixed(2)}) = ${l1.toFixed(3)}</b> · ` +
+      `ถ้าเฉลยคือ "ไม่ใช่": <b>loss = −ln(${(1 - p).toFixed(2)}) = ${l0.toFixed(3)}</b>`;
+  }
+  $('bce_p').addEventListener('input', draw);
+  draw();
+})();
+
+/* =========================================================
+   ซิม 3.2 ลูกบอลกลิ้งลงหุบ
+   ========================================================= */
+(function () {
+  const root = $('s32'), cv = $('s32_cv'), { ctx, W, H } = setupCanvas(cv);
+  // ภูมิประเทศสองแบบ
+  const q4 = w => 0.05 * w ** 4 - 0.6 * w * w + 0.4 * w + 2.5, dq4 = w => 0.2 * w ** 3 - 1.2 * w + 0.4;
+  const newton = w => { for (let i = 0; i < 50; i++) w -= dq4(w) / (0.6 * w * w - 1.2); return w; };
+  const gMin = newton(-2.6), lMin = newton(2.3);
+  const LAND = {
+    // หุบเดียว: f = ½(w−1)² + ½ → ความชัน = w − 1 ระยะห่างจากก้นหุบจึงถูกคูณด้วย (1 − η) ทุกก้าว
+    one: { f: w => 0.5 * (w - 1) ** 2 + 0.5, df: w => w - 1, XR: [-3, 5], YR: [-0.4, 8.6], w0: -2.5, lr: 0.1,
+           mins: [[1, 'ก้นหุบ']] },
+    two: { f: q4, df: dq4, XR: [-4, 4], YR: [-0.9, 7.6], w0: 3.6, lr: 0.05, mins: [[gMin, 'หุบลึก'], [lMin, 'หุบตื้น']] },
+  };
+  let st, timer = null;
+  const L = () => LAND[st.land];
+  const sx = w => 30 + (w - L().XR[0]) / (L().XR[1] - L().XR[0]) * (W - 40);
+  const sy = v => 10 + (L().YR[1] - v) / (L().YR[1] - L().YR[0]) * (H - 34);
+  const inv = x => L().XR[0] + (x - 30) / (W - 40) * (L().XR[1] - L().XR[0]);
+
+  function status() {
+    if (st.state === 'out') return '💥 <b>กระเด็นออกนอกกราฟ</b> learning rate ใหญ่เกินไป ก้าวแต่ละครั้งยาวขึ้นเรื่อย ๆ';
+    if (st.state === 'stuck') return `🔁 <b>เดินมา ${st.k} ก้าวแล้วยังไม่นิ่ง</b> ลูกบอลแกว่งไปมา ไม่ลงก้นหุบ`;
+    if (st.state === 'done') {
+      if (st.land === 'one') return `✅ <b>หยุดนิ่งที่ก้นหุบ</b> (w = ${f2(st.w)}) หลัง ${st.k} ก้าว`;
+      const which = Math.abs(st.w - gMin) < 0.05 ? 'หุบที่ลึกที่สุด (global minimum)' : 'หุบตื้น (local minimum) ไม่ใช่หุบที่ลึกที่สุด';
+      return `✅ <b>หยุดนิ่งแล้ว</b> ที่ w = ${f2(st.w)}, loss = ${f2(L().f(st.w), 3)} หลัง ${st.k} ก้าว → ${which}`;
+    }
+    return '';
+  }
+
+  function draw() {
+    const { f, df, XR, YR } = L();
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
+    for (let w = XR[0]; w <= XR[1]; w++) { ctx.beginPath(); ctx.moveTo(sx(w), sy(YR[1])); ctx.lineTo(sx(w), sy(YR[0])); ctx.stroke(); }
+    ctx.strokeStyle = '#999'; ctx.beginPath(); ctx.moveTo(sx(XR[0]), sy(0)); ctx.lineTo(sx(XR[1]), sy(0)); ctx.stroke();
+    ctx.fillStyle = '#666'; ctx.font = '11px Sarabun, sans-serif'; ctx.textAlign = 'center';
+    for (let w = XR[0]; w <= XR[1]; w++) ctx.fillText(w, sx(w), H - 12);
+    ctx.fillText('w (ค่า weight)', sx((XR[0] + XR[1]) / 2), H - 1);
+    ctx.save(); ctx.translate(11, sy((YR[0] + YR[1]) / 2)); ctx.rotate(-Math.PI / 2); ctx.fillText('loss', 0, 0); ctx.restore();
+    // ภูเขา
+    ctx.beginPath(); ctx.moveTo(sx(XR[0]), sy(YR[0]));
+    for (let i = 0; i <= 400; i++) { const w = XR[0] + (XR[1] - XR[0]) * i / 400; ctx.lineTo(sx(w), sy(Math.min(f(w), YR[1] + 1))); }
+    ctx.lineTo(sx(XR[1]), sy(YR[0])); ctx.closePath();
+    ctx.fillStyle = '#efe7d6'; ctx.fill();
+    ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 2.5; ctx.stroke();
+    ctx.fillStyle = '#7a5230'; ctx.font = '11px Sarabun, sans-serif';
+    for (const [w, t] of L().mins) ctx.fillText(t, sx(w), sy(f(w)) + 16);
+    // ร่องรอย
+    st.trail.forEach((w, i) => {
+      ctx.fillStyle = `rgba(214,69,61,${0.15 + 0.6 * i / st.trail.length})`;
+      ctx.beginPath(); ctx.arc(sx(w), sy(f(w)) - 7, 3, 0, Math.PI * 2); ctx.fill();
+    });
+    if (st.state !== 'out') {
+      const w = st.w, y = f(w), s = df(w);
+      ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 1.5;
+      const dw = 0.7 / Math.sqrt(1 + s * s * 0.15);
+      ctx.beginPath(); ctx.moveTo(sx(w - dw), sy(y - s * dw)); ctx.lineTo(sx(w + dw), sy(y + s * dw)); ctx.stroke();
+      const step = st.mom ? -st.lr * (0.9 * st.v + s) : -st.lr * s;
+      const lim = [XR[0] - 0.3, XR[1] + 0.3];
+      if (Math.abs(step) > 1e-4) arrow(ctx, sx(w), sy(YR[0]) - 6, sx(Math.max(lim[0], Math.min(lim[1], w + step))), sy(YR[0]) - 6, '#1f5fbf', 2);
+      ctx.fillStyle = '#d6453d'; ctx.strokeStyle = '#7d0f12'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(sx(w), sy(y) - 9, 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+    $('s32_lr').value = st.lr; $('s32_lrv').textContent = st.lr.toFixed(2); $('s32_mom').checked = st.mom;
+    $('s32_auto').textContent = timer ? '⏸ หยุด' : '▶ เดินอัตโนมัติ';
+    root.querySelectorAll('[data-land]').forEach(b => b.classList.toggle('on', b.dataset.land === st.land));
+    if (st.state === 'out') { $('s32_out').innerHTML = status(); return; }
+    const s = df(st.w);
+    let stepTxt = st.mom
+      ? `Momentum: ความเร็วใหม่ v = 0.9 × ${f2(st.v, 3)} + (${f2(s, 3)}) = ${f2(0.9 * st.v + s, 3)} → ก้าว = −${st.lr.toFixed(2)} × ${f2(0.9 * st.v + s, 3)} = ${f2(-st.lr * (0.9 * st.v + s), 3)}`
+      : `ก้าว = −η × ความชัน = −${st.lr.toFixed(2)} × (${f2(s, 3)}) = <b>${f2(-st.lr * s, 3)}</b>`;
+    if (st.land === 'one' && !st.mom)
+      stepTxt += `<br>ระยะห่างจากก้นหุบ = ${f2(st.w - 1, 3)} → ก้าวถัดไปเหลือ ${f2(st.w - 1, 3)} × (1 − ${st.lr.toFixed(2)}) = ${f2((st.w - 1) * (1 - st.lr), 3)}`;
+    $('s32_out').innerHTML =
+      `ก้าวที่ ${st.k}: w = <b>${f2(st.w, 3)}</b>, loss = ${f2(L().f(st.w), 3)}, ความชัน ∂L/∂w = ${f2(s, 3)}<br>${stepTxt}<br>${status()}`;
+  }
+
+  function step() {
+    if (st.state !== 'run') return;
+    const { f, df, XR } = L(), s = df(st.w);
+    let d;
+    if (st.mom) { st.v = 0.9 * st.v + s; d = -st.lr * st.v; } else d = -st.lr * s;
+    st.trail.push(st.w); if (st.trail.length > 80) st.trail.shift();
+    st.w += d; st.k++; st.fh.push(f(st.w));
+    const k = st.k, fh = st.fh;
+    if (!isFinite(st.w) || st.w < XR[0] - 0.6 || st.w > XR[1] + 0.6) { st.state = 'out'; stop(); }
+    else if (Math.abs(df(st.w)) < 1e-3 && st.lr * Math.abs(st.mom ? 0.9 * st.v + df(st.w) : df(st.w)) < 1e-4) { st.state = 'done'; stop(); }
+    // ไม่นิ่ง: ค่าต่ำสุดใน 50 ก้าวหลังไม่ได้ต่ำกว่า 50 ก้าวก่อนหน้า
+    else if (k > 100 && Math.min(...fh.slice(k - 50)) >= Math.min(...fh.slice(k - 100, k - 50)) - 1e-9) { st.state = 'stuck'; stop(); }
+    else if (k >= 3000) { st.state = 'stuck'; stop(); }
+  }
+  function stop() { if (timer) { clearInterval(timer); timer = null; } }
+  function restart(w) { stop(); Object.assign(st, { w, v: 0, k: 0, trail: [], fh: [L().f(w)], state: 'run' }); draw(); }
+
+  $('s32_step').addEventListener('click', () => { if (st.state !== 'run') restart(st.w0); step(); draw(); });
+  $('s32_auto').addEventListener('click', () => {
+    if (timer) { stop(); draw(); return; }
+    if (st.state !== 'run') restart(st.w0);
+    timer = setInterval(() => { const n = st.k < 40 ? 1 : 3; for (let i = 0; i < n; i++) step(); draw(); }, 60);
+    draw();
+  });
+  $('s32_lr').addEventListener('input', e => { st.lr = +e.target.value; restart(st.w0); });
+  $('s32_mom').addEventListener('change', e => { st.mom = e.target.checked; restart(st.w0); });
+  root.querySelectorAll('[data-land]').forEach(b => b.addEventListener('click', () => {
+    st.land = b.dataset.land; st.lr = L().lr; st.w0 = L().w0; restart(st.w0);
+  }));
+  cv.addEventListener('pointerdown', e => {
+    const [x] = canvasXY(cv, e, W, H), XR = L().XR;
+    st.w0 = Math.max(XR[0] + 0.1, Math.min(XR[1] - 0.1, inv(x))); restart(st.w0);
+  });
+  const reset = () => { stop(); st = { land: 'one', lr: LAND.one.lr, mom: false, w0: LAND.one.w0 }; restart(st.w0); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 3.3 ให้คอมพิวเตอร์หาเส้นเอง
+   ========================================================= */
+(function () {
+  const root = $('s33');
+  let st, timer = null;
+  const OPT = { sgd: 'SGD', mom: 'Momentum (μ = 0.9)', adam: 'Adam (β₁ = 0.9, β₂ = 0.999)' };
+
+  function init(m, c) {
+    stop();
+    Object.assign(st, { m, c, vm: 0, vc: 0, am: 0, ac: 0, sm: 0, sc: 0, t: 0, path: [[m, c]], hist: [FIT.mse(m, c)], state: 'run' });
+    draw();
+  }
+  function step() {
+    if (st.state !== 'run') return;
+    const [gm, gc] = FIT.grad(st.m, st.c), lr = st.lr;
+    if (st.opt === 'sgd') { st.m -= lr * gm; st.c -= lr * gc; }
+    else if (st.opt === 'mom') { st.vm = 0.9 * st.vm + gm; st.vc = 0.9 * st.vc + gc; st.m -= lr * st.vm; st.c -= lr * st.vc; }
+    else {
+      st.t++;
+      st.am = 0.9 * st.am + 0.1 * gm; st.ac = 0.9 * st.ac + 0.1 * gc;
+      st.sm = 0.999 * st.sm + 0.001 * gm * gm; st.sc = 0.999 * st.sc + 0.001 * gc * gc;
+      const b1 = 1 - 0.9 ** st.t, b2 = 1 - 0.999 ** st.t;
+      st.m -= lr * (st.am / b1) / (Math.sqrt(st.sm / b2) + 1e-8);
+      st.c -= lr * (st.ac / b1) / (Math.sqrt(st.sc / b2) + 1e-8);
+    }
+    st.path.push([st.m, st.c]);
+    const L = FIT.mse(st.m, st.c);
+    st.hist.push(L);
+    if (!isFinite(L) || Math.abs(st.m) > 30 || Math.abs(st.c) > 60) { st.state = 'out'; stop(); }
+    else if (L - FIT.mse(FIT.best_m, FIT.best_c) < 1e-5) { st.state = 'done'; stop(); }
+    else if (st.hist.length > 3000) { st.state = 'done'; stop(); }
+  }
+  function stop() { if (timer) { cancelAnimationFrame(timer); timer = null; } }
+  function loop() { for (let i = 0; i < 2; i++) step(); draw(); if (st.state === 'run') timer = requestAnimationFrame(loop); else { timer = null; draw(); } }
+
+  function draw() {
+    const inMap = Math.abs(st.m) < 30 && Math.abs(st.c) < 60;
+    drawFit($('s33_fit'), inMap ? st.m : 0, inMap ? st.c : 0);
+    drawMap($('s33_map'), st.m, st.c, st.path, st.state !== 'out');
+    drawLossChart($('s33_loss'), st.hist.filter(isFinite), 'ก้าว');
+    $('s33_lr').value = st.lr; $('s33_lrv').textContent = st.lr.toFixed(3);
+    root.querySelectorAll('[data-opt]').forEach(b => b.classList.toggle('on', b.dataset.opt === st.opt));
+    $('s33_auto').textContent = timer ? '⏸ หยุด' : '▶ เดินอัตโนมัติ';
+    const [gm, gc] = FIT.grad(st.m, st.c), k = st.hist.length - 1;
+    let msg = '';
+    if (st.state === 'out') msg = '💥 <b>กระเด็นออก</b> learning rate ใหญ่เกินไปสำหรับ SGD/Momentum บนหุบที่ชันแบบนี้ ลองลด η';
+    else if (st.state === 'done') msg = `✅ <b>ถึง ★ แล้ว</b> ใช้ ${k} ก้าว ด้วย ${OPT[st.opt]}`;
+    $('s33_out').innerHTML = st.state === 'out' ? msg :
+      `ก้าวที่ ${k} · ${OPT[st.opt]} · m = <b>${f2(st.m, 3)}</b>, c = <b>${f2(st.c, 3)}</b>, MSE = <b>${f2(FIT.mse(st.m, st.c), 4)}</b><br>` +
+      `gradient = (∂L/∂m, ∂L/∂c) = (${f2(gm, 3)}, ${f2(gc, 3)})` +
+      (st.opt === 'sgd' ? ` → m ใหม่ = ${f2(st.m, 3)} − ${st.lr.toFixed(3)}×${f2(gm, 3)} = ${f2(st.m - st.lr * gm, 3)}, c ใหม่ = ${f2(st.c, 3)} − ${st.lr.toFixed(3)}×${f2(gc, 3)} = ${f2(st.c - st.lr * gc, 3)}` : '') +
+      (msg ? '<br>' + msg : '');
+  }
+
+  root.querySelectorAll('[data-opt]').forEach(b => b.addEventListener('click', () => { st.opt = b.dataset.opt; init(st.m0, st.c0); }));
+  $('s33_lr').addEventListener('input', e => { st.lr = +e.target.value; init(st.m0, st.c0); });
+  $('s33_step').addEventListener('click', () => { if (st.state !== 'run') init(st.m0, st.c0); step(); draw(); });
+  $('s33_auto').addEventListener('click', () => {
+    if (timer) { stop(); draw(); return; }
+    if (st.state !== 'run') init(st.m0, st.c0);
+    timer = requestAnimationFrame(loop); draw();
+  });
+  const mapCv = $('s33_map');
+  mapCv.addEventListener('pointerdown', e => {
+    const { W } = setupCanvas(mapCv); const [x, y] = canvasXY(mapCv, e, W, W);
+    [st.m0, st.c0] = FIT.fromMap(x / W * FIT.S, y / W * FIT.S); init(st.m0, st.c0);
+  });
+  const reset = () => { stop(); st = { opt: 'sgd', lr: 0.05, m0: 2.6, c0: -2.2 }; init(st.m0, st.c0); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 3.4 นิวรอนเรียนรู้เอง (BCE + gradient descent)
+   ========================================================= */
+(function () {
+  const root = $('s34'), cv = $('s34_plane'), { ctx, W } = setupCanvas(cv);
+  const P0 = 40, SZ = W - P0 - 12, TOP = 12;
+  const toPx = (r, g) => [P0 + r * SZ, TOP + (1 - g) * SZ];
+  const fp = fruitPixels();
+  const mk = (arr, y, name) => arr.map(p => ({ ...p, y, name }));
+  const DATA = {
+    A: { yes: 'แอปเปิลแดง', pts: [...mk(fp.red, 1, 'แอปเปิลแดง'), ...mk(fp.green, 0, 'แอปเปิลเขียว')] },
+    B: { yes: 'ส้ม', pts: [...mk(fp.orange, 1, 'ส้ม'), ...mk(fp.red.slice(0, 20), 0, 'แอปเปิลแดง'), ...mk(fp.yellow, 0, 'กล้วย')] },
+  };
+  let st, timer = null;
+  const OPT34 = { mom: 'Momentum (μ = 0.9)', sgd: 'SGD' };
+  const bce = (p, y) => -(y ? Math.log(Math.max(p, 1e-12)) : Math.log(Math.max(1 - p, 1e-12)));
+  function evalAll() {
+    const pts = DATA[st.ds].pts;
+    let L = 0, ok = 0, gw1 = 0, gw2 = 0, gb = 0;
+    for (const q of pts) {
+      const p = logistic(st.w1 * q.r + st.w2 * q.g + st.b);
+      L += bce(p, q.y); if ((p > 0.5 ? 1 : 0) === q.y) ok++;
+      gw1 += (p - q.y) * q.r; gw2 += (p - q.y) * q.g; gb += p - q.y;
+    }
+    const n = pts.length;
+    return { L: L / n, ok, n, g: [gw1 / n, gw2 / n, gb / n] };
+  }
+  function step() {
+    const e = evalAll();
+    if (st.opt === 'mom') {
+      st.v = st.v.map((v, i) => 0.9 * v + e.g[i]);
+      st.w1 -= st.lr * st.v[0]; st.w2 -= st.lr * st.v[1]; st.b -= st.lr * st.v[2];
+    } else { st.w1 -= st.lr * e.g[0]; st.w2 -= st.lr * e.g[1]; st.b -= st.lr * e.g[2]; }
+    st.k++; st.hist.push(evalAll().L);
+    if (st.k >= 4000) stop();
+  }
+  function stop() { if (timer) { cancelAnimationFrame(timer); timer = null; } }
+  function loop() { const n = st.k < 150 ? 1 : 4; for (let i = 0; i < n; i++) step(); draw(); if (timer) timer = requestAnimationFrame(loop); }
+
+  function draw() {
+    const { w1, w2, b } = st, pts = DATA[st.ds].pts;
+    const step = 4;
+    for (let py = 0; py < SZ; py += step) for (let px = 0; px < SZ; px += step) {
+      const r = (px + step / 2) / SZ, g = 1 - (py + step / 2) / SZ, s = logistic(w1 * r + w2 * g + b);
+      const c0 = [236, 236, 236], c1 = [203, 222, 250];
+      ctx.fillStyle = `rgb(${c0.map((v, i) => Math.round(v + (c1[i] - v) * s)).join(',')})`;
+      ctx.fillRect(P0 + px, TOP + py, step, step);
+    }
+    ctx.clearRect(0, 0, P0, W); ctx.clearRect(0, TOP + SZ, W, W);
+    ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.strokeRect(P0, TOP, SZ, SZ);
+    ctx.fillStyle = '#444'; ctx.font = '12px Sarabun, sans-serif'; ctx.textAlign = 'center';
+    for (const t of [0, 0.5, 1]) {
+      const [x] = toPx(t, 0), [, y] = toPx(0, t);
+      ctx.fillText(t, x, TOP + SZ + 14); ctx.textAlign = 'right'; ctx.fillText(t, P0 - 5, y + 4); ctx.textAlign = 'center';
+    }
+    ctx.fillText('R (แดง) →', P0 + SZ / 2, TOP + SZ + 28);
+    ctx.save(); ctx.translate(12, TOP + SZ / 2); ctx.rotate(-Math.PI / 2); ctx.fillText('G (เขียว) →', 0, 0); ctx.restore();
+    ctx.save(); ctx.beginPath(); ctx.rect(P0, TOP, SZ, SZ); ctx.clip();
+    if (Math.abs(w2) > 1e-9 || Math.abs(w1) > 1e-9) {
+      ctx.strokeStyle = '#1f2933'; ctx.lineWidth = 2.5; ctx.beginPath();
+      if (Math.abs(w2) > 1e-9) { ctx.moveTo(...toPx(-1, -(w1 * -1 + b) / w2)); ctx.lineTo(...toPx(2, -(w1 * 2 + b) / w2)); }
+      else { ctx.moveTo(...toPx(-b / w1, -1)); ctx.lineTo(...toPx(-b / w1, 2)); }
+      ctx.stroke();
+    }
+    // จุด: ขนาดตาม BCE ของจุดนั้น
+    const order = pts.map((q, i) => i).sort((i, j) => {
+      const li = bce(logistic(w1 * pts[i].r + w2 * pts[i].g + b), pts[i].y), lj = bce(logistic(w1 * pts[j].r + w2 * pts[j].g + b), pts[j].y);
+      return li - lj;
+    });
+    for (const i of order) {
+      const q = pts[i], [x, y] = toPx(q.r, q.g), l = bce(logistic(w1 * q.r + w2 * q.g + b), q.y);
+      const rad = 3 + Math.min(l, 4) * 3;
+      ctx.fillStyle = `rgb(${q.c})`; ctx.strokeStyle = q.y ? '#000' : '#fff'; ctx.lineWidth = q.y ? 1.5 : 2;
+      ctx.beginPath();
+      if (q.y) ctx.arc(x, y, rad, 0, Math.PI * 2);
+      else { ctx.moveTo(x, y - rad * 1.15); ctx.lineTo(x + rad, y + rad * 0.85); ctx.lineTo(x - rad, y + rad * 0.85); ctx.closePath(); }
+      ctx.fill(); ctx.stroke();
+      if (!q.y) { ctx.strokeStyle = '#000'; ctx.lineWidth = 0.8; ctx.stroke(); }
+    }
+    ctx.restore();
+
+    const e = evalAll();
+    $('s34_out').innerHTML =
+      `โจทย์: ● = ${DATA[st.ds].yes} (ใช่), ▲ = อย่างอื่น · ขนาดจุด = BCE ของจุดนั้น<br>` +
+      `${OPT34[st.opt]} · ปรับไปแล้ว <b>${st.k}</b> ครั้ง · BCE เฉลี่ย = <b>${e.L.toFixed(4)}</b> · ทำนายถูก <b>${e.ok} / ${e.n}</b><br>` +
+      `<span class="mono small">w₁ = ${f2(w1)}, w₂ = ${f2(w2)}, b = ${f2(b)}</span><br>` +
+      `<span class="mono small">gradient = (${f2(e.g[0], 4)}, ${f2(e.g[1], 4)}, ${f2(e.g[2], 4)})</span>`;
+    drawLossChart($('s34_loss'), st.hist, 'ครั้ง');
+    $('s34_lr').value = st.lr; $('s34_lrv').textContent = st.lr.toFixed(1);
+    root.querySelectorAll('[data-ds]').forEach(bt => bt.classList.toggle('on', bt.dataset.ds === st.ds));
+    root.querySelectorAll('[data-opt34]').forEach(bt => bt.classList.toggle('on', bt.dataset.opt34 === st.opt));
+    $('s34_auto').textContent = timer ? '⏸ หยุด' : '▶ เทรนอัตโนมัติ';
+  }
+  function init(ds) {
+    stop();
+    st = { ds, lr: st ? st.lr : 3, opt: st ? st.opt : 'mom', w1: 2, w2: 2, b: -2, v: [0, 0, 0], k: 0, hist: [] };
+    st.hist.push(evalAll().L); draw();
+  }
+  root.querySelectorAll('[data-ds]').forEach(bt => bt.addEventListener('click', () => init(bt.dataset.ds)));
+  root.querySelectorAll('[data-opt34]').forEach(bt => bt.addEventListener('click', () => { st.opt = bt.dataset.opt34; init(st.ds); }));
+  $('s34_lr').addEventListener('input', e => { st.lr = +e.target.value; draw(); });
+  $('s34_step').addEventListener('click', () => { step(); draw(); });
+  $('s34_auto').addEventListener('click', () => {
+    if (timer) { stop(); draw(); return; }
+    timer = requestAnimationFrame(loop); draw();
+  });
+  root.querySelector('[data-act=reset]').addEventListener('click', () => { st.lr = 3; st.opt = 'mom'; init(st.ds); });
+  init('A');
+})();
+
+/* =========================================================
+   🔗 และแบบทดสอบ
+   ========================================================= */
+renderPipeline($('pipe'), ['backbone', 'neck', 'head']);
+
+initQuiz($('quiz'), [
+  {
+    q: 'โมเดลทำนาย 2 และ 4 แต่ค่าจริงคือ 3 และ 2 ค่า MSE เท่าใด',
+    options: ['2.5', '0.5', '1.5', '5'],
+    answer: 0,
+    explain: 'ความคลาดเคลื่อน = 2 − 3 = −1 และ 4 − 2 = 2 → ยกกำลังสองได้ 1 และ 4 → เฉลี่ย (1 + 4)/2 = 2.5 ถ้าเฉลี่ยโดยไม่ยกกำลังสองจะได้ 0.5 ซึ่งผิด เพราะค่าลบกับบวกหักล้างกัน',
+  },
+  {
+    q: 'เฉลยคือ "ใช่" โมเดล A ตอบ p = 0.9 และโมเดล B ตอบ p = 0.1 BCE ของทั้งสองเป็นอย่างไร',
+    options: ['A ≈ 0.11, B ≈ 2.30 — B ถูกลงโทษหนักกว่ามาก', 'A ≈ 0.1, B ≈ 0.9 — ต่างกันแค่ 9 เท่า', 'ทั้งสองเท่ากันเพราะห่างจาก 0.5 เท่ากัน', 'A ≈ 2.30, B ≈ 0.11'],
+    answer: 0,
+    explain: '−ln(0.9) ≈ 0.105 และ −ln(0.1) ≈ 2.303 BCE โตเร็วมากเมื่อมั่นใจผิดทาง (p ใกล้ 0 ทั้งที่เฉลยคือใช่)',
+  },
+  {
+    q: 'gradient ของ loss ชี้ไปทางใด และเราจึงปรับ weight อย่างไร',
+    options: ['ชี้ไปทางที่ loss ลดเร็วที่สุด จึงเดินตาม', 'ชี้ไปทางที่ loss เพิ่มเร็วที่สุด จึงเดินสวนทาง', 'ชี้ไปที่จุดต่ำสุดเสมอ จึงกระโดดไปที่นั่นทันที', 'ชี้ไปทางสุ่ม จึงต้องลองหลายทาง'],
+    answer: 1,
+    explain: 'gradient ชี้ "ขึ้นเขา" สูตร w − η·∂L/∂w จึงเดินสวนทาง และในซิม 3.3 เห็นว่าทิศลงเร็วที่สุดไม่จำเป็นต้องชี้ไปที่ ★ ตรง ๆ',
+  },
+  {
+    q: 'w = 2, ∂L/∂w = 4, learning rate η = 0.05 หลังปรับหนึ่งก้าว w เป็นเท่าใด',
+    options: ['2.2', '1.8', '1.6', '0'],
+    answer: 1,
+    explain: 'w ใหม่ = 2 − 0.05 × 4 = 2 − 0.2 = 1.8 (ความชันเป็นบวก w จึงลดลง)',
+  },
+  {
+    q: 'ระหว่างเทรน loss แกว่งขึ้นลงแรงและบางครั้งกลายเป็น nan สาเหตุที่เป็นไปได้มากที่สุดคืออะไร',
+    options: ['learning rate เล็กเกินไป', 'learning rate ใหญ่เกินไป', 'ข้อมูลมีน้อยเกินไป', 'ใช้ BCE แทน MSE'],
+    answer: 1,
+    explain: 'ก้าวที่ยาวเกินไปทำให้กระโดดข้ามก้นหุบไปมาและกระเด็นออก (ซิม 3.2 แบบหุบเดียวที่ η &gt; 2) จน loss ใหญ่ผิดปกติจนเป็น nan',
+  },
+  {
+    q: 'ในซิม 3.2 ลูกบอลที่เริ่มทางขวาหยุดในหุบตื้นแทนหุบที่ลึกกว่า เพราะอะไร',
+    options: ['เพราะ learning rate ใหญ่เกินไป', 'เพราะที่ก้นหุบตื้นความชันเป็น 0 gradient descent จึงไม่รู้ว่ามีหุบที่ลึกกว่า', 'เพราะ loss ในหุบตื้นติดลบ', 'เพราะคอมพิวเตอร์คำนวณผิด'],
+    answer: 1,
+    explain: 'gradient descent มองเห็นแค่ความชันตรงจุดที่ยืน เมื่อความชันเป็น 0 ก็หยุด ซึ่งอาจเป็น local minimum ส่วน momentum ช่วยให้กลิ้งข้ามเนินได้ในบางกรณี',
+  },
+  {
+    q: 'สั่ง YOLO("yolo11n-seg.pt").train(data="coco8-seg.yaml") ด้วยค่าเริ่มต้นทั้งหมด (ultralytics 8.4.2) จะได้ optimizer อะไร',
+    options: ['SGD ด้วย lr0 = 0.01', 'AdamW ด้วย lr = 0.001', 'MuSGD ด้วย lr ≈ 0.000119 (ไม่ใช้ lr0 = 0.01 ที่ตั้งไว้)', 'Adam ด้วย lr = 0.01'],
+    answer: 2,
+    explain: 'optimizer = auto และ coco8-seg มีภาพน้อย จำนวนก้าวไม่เกิน 10,000 จึงเลือก MuSGD กับ lr = 0.002 × 5 / (4 + 80) ≈ 0.000119 โดยไม่สนใจ lr0 log ของการเทรนจริงพิมพ์ "MuSGD(lr=0.000119, momentum=0.9)"',
+  },
+  {
+    q: 'cls_loss ของ YOLO11 ใช้ loss แบบใด',
+    options: ['MSE', 'BCE (BCEWithLogitsLoss)', 'CIoU', 'ไม่มี loss สำหรับคลาส'],
+    answer: 1,
+    explain: 'คำถาม "วัตถุนี้เป็นคลาสนี้หรือไม่" เป็นแบบใช่/ไม่ใช่ จึงใช้ BCE ใน utils/loss.py ใช้ nn.BCEWithLogitsLoss ส่วน CIoU ใช้กับกล่อง',
+  },
+]);
+</script>
+</body>
+</html>

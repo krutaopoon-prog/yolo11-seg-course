@@ -37,6 +37,16 @@ function letterbox(w, h, mode = 'square', newShape = 640, stride = 32) {
   };
 }
 
+// ตัวสุ่มแบบกำหนด seed ได้ (mulberry32) ให้ซิมได้ข้อมูลชุดเดิมทุกครั้งที่เปิด
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
 /* ---------- ภาพตัวอย่างประจำรายวิชา ---------- */
 
 // ผลไม้แต่ละลูกในพิกัดหน่วย (0–1) ของ "กรอบฉาก" สี่เหลี่ยมจัตุรัส เรียงจากหลังมาหน้า
@@ -175,6 +185,53 @@ function makeFruitImage(w, h) {
   c.width = w; c.height = h;
   drawFruitBasket(c.getContext('2d'), w, h);
   return c;
+}
+
+// พิกเซลจริงจากภาพผลไม้ สำหรับโจทย์แยกสีในบทที่ 2–3 (ลำดับการสุ่มเดียวกับซิม 2.1 จึงได้จุดชุดเดียวกัน)
+// คืนค่า { red, green, orange, yellow } แต่ละตัวเป็นอาร์เรย์ของ { r, g, c } โดย r, g อยู่ในช่วง 0–1
+function fruitPixels() {
+  const N = 320, img = makeFruitImage(N, N).getContext('2d').getImageData(0, 0, N, N).data;
+  const { X, Y } = sceneFrame(N, N), rand = rng(7);
+  const px = (u, v) => {
+    const x = Math.round(X(u)), y = Math.round(Y(v)), i = (y * N + x) * 4;
+    const c = [img[i], img[i + 1], img[i + 2]];
+    return { r: c[0] / 255, g: c[1] / 255, c };
+  };
+  const disc = (u, v, r, n) => Array.from({ length: n }, () => {
+    const a = rand() * Math.PI * 2, d = Math.sqrt(rand()) * r;
+    return px(u + Math.cos(a) * d, v + Math.sin(a) * d);
+  });
+  const banana = n => Array.from({ length: n }, () => {
+    const t = 0.65 + rand() * 0.2, s = 1 - t;
+    const u = s * s * 0.16 + 2 * s * t * 0.36 + t * t * 0.62, v = s * s * 0.40 + 2 * s * t * 0.52 + t * t * 0.30;
+    return px(u + (rand() - 0.5) * 0.04, v + (rand() - 0.5) * 0.04);
+  });
+  const red = [...disc(0.58, 0.55, 0.045, 20), ...disc(0.40, 0.60, 0.025, 10)];
+  const green = disc(0.79, 0.57, 0.035, 30);
+  const orange = disc(0.28, 0.56, 0.045, 30);
+  const yellow = banana(20);
+  return { red, green, orange, yellow };
+}
+
+/* ---------- ตัวช่วยวาดกราฟ ---------- */
+
+const logistic = z => 1 / (1 + Math.exp(-z));
+
+// ทำให้ canvas คมบนจอความละเอียดสูง โดยยังวาดด้วยพิกัดตามขนาดเดิม
+function setupCanvas(cv) {
+  const r = window.devicePixelRatio || 1, w = cv.width, h = cv.height;
+  if (r !== 1 && !cv.dataset.dpi) {
+    cv.width = w * r; cv.height = h * r; cv.dataset.dpi = w + 'x' + h;
+    cv.getContext('2d').scale(r, r);
+  }
+  const [W, H] = cv.dataset.dpi ? cv.dataset.dpi.split('x').map(Number) : [w, h];
+  return { ctx: cv.getContext('2d'), W, H };
+}
+
+// แปลงตำแหน่งเมาส์/นิ้วเป็นพิกัดของ canvas (ขนาด W×H)
+function canvasXY(cv, e, W, H) {
+  const rect = cv.getBoundingClientRect();
+  return [(e.clientX - rect.left) / rect.width * W, (e.clientY - rect.top) / rect.height * H];
 }
 
 /* ---------- ผัง 🔗 อยู่ตรงไหนใน YOLO11-seg ---------- */

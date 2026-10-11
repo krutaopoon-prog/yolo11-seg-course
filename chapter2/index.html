@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>บทที่ 2 นิวรอนและฟังก์ชันกระตุ้น | เข้าใจ YOLO11-seg</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+  <p class="topnav"><a href="../">← สารบัญ</a> · หน่วยที่ 1 พื้นฐานการเรียนรู้ของเครื่อง</p>
+  <h1>บทที่ 2 นิวรอนและฟังก์ชันกระตุ้น</h1>
+  <p class="muted">หน่วยคำนวณที่เล็กที่สุดของเครือข่าย: รับตัวเลข คูณ บวก แล้ว "งอ"</p>
+
+  <!-- ===================== 1. วัตถุประสงค์ ===================== -->
+  <div class="box info">
+    <span class="box-title">🎯 วัตถุประสงค์การเรียนรู้</span>
+    เมื่อจบบทนี้ คุณควรทำสิ่งต่อไปนี้ได้
+    <ol>
+      <li>คำนวณผลลัพธ์ของนิวรอน y = f(w·x + b) จากตัวเลขที่กำหนดได้</li>
+      <li>อธิบายได้ว่า weight และ bias ทำให้เส้นแบ่งหมุนและเลื่อนอย่างไร</li>
+      <li>เปรียบเทียบรูปกราฟและความชันของ Step, Sigmoid, ReLU และ SiLU ได้</li>
+      <li>อธิบายได้ว่าทำไมเครือข่ายที่ไม่มี activation จะยุบรวมเหลือฟังก์ชันเชิงเส้นชั้นเดียว</li>
+      <li>บอกได้ว่า YOLO11 ใช้ activation อะไร และใช้ตรงไหน</li>
+    </ol>
+  </div>
+
+  <!-- ===================== 2. ทบทวน ===================== -->
+  <h2>ทบทวนความรู้เดิม</h2>
+  <p>
+    ในบทที่ 1 คุณเห็นแล้วว่าภาพหนึ่งภาพถูกเปลี่ยนเป็น tensor <code>(1, 3, H, W)</code> ที่มีตัวเลข 0–1 นับแสนตัว
+    บทนี้ถามต่อว่า <strong>ตัวเลขพวกนั้นถูกนำไป "คิด" อย่างไร</strong>
+    คำตอบเริ่มจากหน่วยคำนวณเล็ก ๆ ที่เรียกว่า <strong>นิวรอน (neuron)</strong>
+    YOLO11-seg ทั้งตัวก็คือการนำนิวรอนจำนวนมหาศาลมาต่อกันเป็นชั้น ๆ
+    เพื่อให้เห็นภาพ บทนี้จะใช้ตัวเลขจากภาพผลไม้ในตะกร้าของบทที่ 1 เป็นอินพุต
+  </p>
+
+  <!-- ===================== 3. เนื้อหา ===================== -->
+  <h2>2.1 นิวรอนหนึ่งตัวทำอะไร</h2>
+  <p>
+    สมมติเราอยากให้คอมพิวเตอร์ตอบว่าพิกเซลหนึ่งเป็น "แอปเปิลแดง" หรือไม่ โดยดูจากค่าสีเพียงสองค่าคือ R และ G (ค่า 0–1 จากบทที่ 1)
+    นิวรอนทำงานเป็น 3 จังหวะ
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 680 230" width="680" role="img" aria-label="แผนภาพนิวรอนหนึ่งตัว">
+      <style>
+        .n { font: 15px Sarabun, sans-serif; text-anchor: middle; dominant-baseline: middle; }
+        .s { font: 13px Sarabun, sans-serif; text-anchor: middle; }
+        .m { font: 13px Consolas, monospace; text-anchor: middle; dominant-baseline: middle; }
+      </style>
+      <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#555"/></marker></defs>
+      <!-- inputs -->
+      <circle cx="60" cy="60" r="34" fill="#fdecea" stroke="#d6453d" stroke-width="2"/>
+      <text class="n" x="60" y="52">R</text><text class="m" x="60" y="72">0.85</text>
+      <circle cx="60" cy="170" r="34" fill="#e8f6ed" stroke="#2f9e55" stroke-width="2"/>
+      <text class="n" x="60" y="162">G</text><text class="m" x="60" y="182">0.20</text>
+      <!-- weights -->
+      <line x1="94" y1="68" x2="232" y2="108" stroke="#3b6fd6" stroke-width="5" marker-end="url(#a2)"/>
+      <text class="m" x="160" y="70" fill="#3b6fd6">× w₁ = 4</text>
+      <line x1="94" y1="162" x2="232" y2="124" stroke="#d6453d" stroke-width="6" marker-end="url(#a2)"/>
+      <text class="m" x="160" y="168" fill="#d6453d">× w₂ = −5</text>
+      <!-- sum -->
+      <circle cx="270" cy="115" r="36" fill="#fff" stroke="#333" stroke-width="2"/>
+      <text class="n" x="270" y="115" style="font-size:26px">Σ</text>
+      <text class="m" x="270" y="30">+ b = −1</text>
+      <line x1="270" y1="40" x2="270" y2="76" stroke="#555" marker-end="url(#a2)"/>
+      <line x1="306" y1="115" x2="398" y2="115" stroke="#555" marker-end="url(#a2)"/>
+      <text class="m" x="352" y="100">z = 1.4</text>
+      <!-- activation -->
+      <rect x="400" y="80" width="80" height="70" rx="8" fill="#fdf6e3" stroke="#d9a520" stroke-width="2"/>
+      <path d="M410,138 C440,138 440,92 470,92" fill="none" stroke="#b4441e" stroke-width="2.5"/>
+      <text class="s" x="440" y="170">f = sigmoid</text>
+      <line x1="480" y1="115" x2="560" y2="115" stroke="#555" marker-end="url(#a2)"/>
+      <!-- output -->
+      <text class="m" x="615" y="105" style="font-size:16px">y = 0.80</text>
+      <text class="s" x="615" y="130">"น่าจะเป็นแอปเปิลแดง"</text>
+      <!-- steps -->
+      <text class="s" x="160" y="220" fill="#777">① คูณด้วย weight</text>
+      <text class="s" x="300" y="220" fill="#777">② รวมแล้วบวก bias</text>
+      <text class="s" x="460" y="220" fill="#777">③ ผ่าน activation</text>
+    </svg>
+    <figcaption>รูปที่ 2.1 นิวรอนรับ R = 0.85, G = 0.20 → z = 4(0.85) + (−5)(0.20) + (−1) = 1.4 → sigmoid(1.4) ≈ 0.80</figcaption>
+  </figure>
+
+  <ol>
+    <li><strong>คูณด้วยน้ำหนัก (weight, w)</strong> น้ำหนักบอกว่าอินพุตแต่ละตัว "สำคัญแค่ไหน และไปทางไหน" w₁ = 4 (บวก) แปลว่า R ยิ่งมากยิ่งน่าจะใช่ ส่วน w₂ = −5 (ลบ) แปลว่า G ยิ่งมากยิ่ง <em>ไม่</em> น่าใช่</li>
+    <li><strong>รวมกันแล้วบวกค่าไบแอส (bias, b)</strong> ได้ผลรวมถ่วงน้ำหนัก (weighted sum) z = w₁x₁ + w₂x₂ + b ไบแอสเปรียบเหมือน "เกณฑ์" ที่บอกว่าต้องมีหลักฐานมากแค่ไหนจึงจะเริ่มตอบว่าใช่</li>
+    <li><strong>ผ่านฟังก์ชันกระตุ้น (activation function, f)</strong> เปลี่ยน z เป็นผลลัพธ์ y ในรูปนี้ใช้ sigmoid ซึ่งบีบค่าให้อยู่ระหว่าง 0 ถึง 1 จึงอ่านเป็น "ความมั่นใจ" ได้</li>
+  </ol>
+  <p>
+    เขียนสั้น ๆ ได้ว่า <strong>y = f(w·x + b)</strong> โดย w·x คือการคูณทีละคู่แล้วรวมกัน (dot product)
+    สิ่งที่โมเดล "เรียนรู้" มีแค่ค่า w และ b ทั้งหมดเท่านั้น ส่วนวิธีเรียนรู้จะอยู่ในบทที่ 3–4
+  </p>
+
+  <h3>มองแบบภาพ: นิวรอนหนึ่งตัวคือ "เส้นแบ่ง"</h3>
+  <p>
+    ถ้านำพิกเซลหลายจุดมาวางบนกราฟ แกนนอนเป็น R และแกนตั้งเป็น G จุดที่ทำให้ z = 0 พอดีจะเรียงกันเป็น <strong>เส้นตรง</strong>
+    จุดฝั่งหนึ่งของเส้นได้ z &gt; 0 (ตอบว่าใช่) อีกฝั่งได้ z &lt; 0 (ตอบว่าไม่ใช่)
+    การเปลี่ยน w จะ <strong>หมุน</strong> เส้น และการเปลี่ยน b จะ <strong>เลื่อน</strong> เส้น ลองดูในซิมมูเลชั่นด้านล่าง
+  </p>
+
+  <!-- ---------- ซิม 2.1 ---------- -->
+  <div class="sim" id="sim21">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 2.1 นิวรอนตัวเดียวแบ่งพิกเซลผลไม้</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองปรับ w₁, w₂, b ให้เส้นแบ่งแยก ● (ใช่) ออกจาก ✕ (ไม่ใช่) ให้ได้ครบทุกจุด แล้วสลับไปโจทย์ "ส้ม" และสังเกตว่ายังทำได้หรือไม่</p>
+    <div class="controls">
+      โจทย์:
+      <button data-ds="A">แอปเปิลแดง vs แอปเปิลเขียว</button>
+      <button data-ds="B">ส้ม vs (แอปเปิลแดง + กล้วย)</button>
+    </div>
+    <div class="controls">
+      <label>w₁ (คูณ R) <input type="range" id="n_w1" min="-12" max="12" step="0.1"> <span class="mono" id="n_w1v"></span></label>
+      <label>w₂ (คูณ G) <input type="range" id="n_w2" min="-12" max="12" step="0.1"> <span class="mono" id="n_w2v"></span></label>
+      <label>b <input type="range" id="n_b" min="-12" max="12" step="0.1"> <span class="mono" id="n_bv"></span></label>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col">
+        <canvas id="n_plane" width="360" height="360" style="width:100%;max-width:360px;cursor:pointer"></canvas>
+      </div>
+      <div class="sim-col">
+        <div id="n_score" class="sim-out" style="font-size:1.05rem"></div>
+        <p class="small" style="margin:8px 0 2px"><strong>ข้างในนิวรอน</strong> (ชี้หรือแตะจุดบนกราฟเพื่อเปลี่ยนพิกเซล)</p>
+        <div id="n_diag"></div>
+      </div>
+    </div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>จุดแต่ละจุดคือพิกเซลจริงจากภาพผลไม้ในตะกร้า ระบายด้วยสีจริงของพิกเซลนั้น พิกเซลของผลไม้ลูกเดียวกันจึงกระจายเป็นกลุ่ม ไม่ได้อยู่จุดเดียว (เหมือนที่เห็นในซิม 1.1)</li>
+        <li>ลูกศรตั้งฉากกับเส้นชี้ไปทางฝั่ง "ใช่" ทิศของลูกศรคือ (w₁, w₂) การเพิ่ม w₁ จึงหมุนลูกศรไปทาง R มากขึ้น ส่วน b เลื่อนเส้นโดยไม่หมุน</li>
+        <li>สีพื้นหลังที่ไล่ระดับคือค่า sigmoid ยิ่งไกลจากเส้นยิ่งมั่นใจ ลองคูณ w ทุกตัวและ b ด้วยค่าเดียวกันให้ใหญ่ขึ้น เส้นไม่ขยับ แต่ขอบจะคมขึ้น</li>
+        <li>โจทย์ส้มทำไม่ได้ครบด้วยเส้นตรงเส้นเดียว เพราะส้มอยู่ <em>ตรงกลาง</em> ระหว่างแอปเปิลแดง (G ต่ำ) กับกล้วย (G สูง) ต้องใช้สองเส้นหนีบไว้ คือต้องใช้นิวรอนหลายตัว (หัวข้อ 2.3)</li>
+      </ul>
+    </div>
+  </div>
+
+  <details class="think">
+    <summary>🤔 ลองคิดก่อน: ถ้าตั้ง w₁ = w₂ = 0 นิวรอนจะตอบอะไร</summary>
+    z = b ทุกจุด นิวรอนตอบค่าเดียวกันหมดไม่ว่าสีจะเป็นอะไร ถ้า b &gt; 0 ตอบ "ใช่" ทุกพิกเซล ถ้า b &lt; 0 ตอบ "ไม่ใช่" ทุกพิกเซล
+    นิวรอนจะแยกแยะอะไรได้ก็ต่อเมื่อมี weight ที่ไม่เป็นศูนย์
+  </details>
+
+  <h2>2.2 ฟังก์ชันกระตุ้น 4 แบบ</h2>
+  <p>
+    ฟังก์ชันกระตุ้นรับ z (ซึ่งมีค่าได้ตั้งแต่ลบมาก ๆ ถึงบวกมาก ๆ) แล้วแปลงเป็นผลลัพธ์ y สิ่งที่ต้องดูมีสองอย่าง
+    คือ <strong>รูปกราฟ</strong> (ผลลัพธ์เป็นแบบไหน) และ <strong>ความชัน</strong> (ถ้า z ขยับนิดหนึ่ง y ขยับเท่าไร)
+    ความชันสำคัญมาก เพราะบทที่ 3 จะใช้ความชันบอกโมเดลว่าควรปรับ weight ไปทางไหน
+  </p>
+  <div id="actGallery" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:1em 0"></div>
+  <div class="table-wrap">
+  <table>
+    <tr><th>ชื่อ</th><th>สูตร</th><th>ช่วงผลลัพธ์</th><th>จุดเด่น / ปัญหา</th></tr>
+    <tr><td><strong>Step</strong></td><td>1 ถ้า z ≥ 0, ไม่งั้น 0</td><td>0 หรือ 1</td><td>เข้าใจง่ายที่สุด แต่ความชันเป็น 0 ทุกที่ จึงบอกไม่ได้ว่าควรปรับ weight ทางไหน ใช้เทรนไม่ได้</td></tr>
+    <tr><td><strong>Sigmoid</strong> σ</td><td>1 / (1 + e<sup>−z</sup>)</td><td>0 ถึง 1</td><td>อ่านเป็นความน่าจะเป็นได้ แต่ถ้า z ใหญ่หรือเล็กมาก กราฟจะแบน ความชันเกือบเป็น 0 (อิ่มตัว)</td></tr>
+    <tr><td><strong>ReLU</strong></td><td>max(0, z)</td><td>0 ถึง ∞</td><td>คำนวณเร็ว ความชันเป็น 1 ฝั่งบวก แต่เป็น 0 ทั้งฝั่งลบ นิวรอนที่ติดฝั่งลบจะหยุดเรียนรู้</td></tr>
+    <tr><td><strong>SiLU</strong></td><td>z · σ(z)</td><td>ประมาณ −0.28 ถึง ∞</td><td>คล้าย ReLU แต่โค้งเรียบ ฝั่งลบใกล้ศูนย์ยังมีค่าและความชันอยู่ <strong>YOLO11 ใช้ตัวนี้</strong></td></tr>
+  </table>
+  </div>
+
+  <!-- ---------- ซิม 2.2 ---------- -->
+  <div class="sim" id="sim22">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 2.2 สนามกราฟ activation</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองลากจุดบนกราฟไปทางซ้ายสุดและขวาสุด แล้วสังเกตว่าความชัน (เส้นสัมผัส) ของแต่ละฟังก์ชันเป็นศูนย์ตรงไหนบ้าง</p>
+    <div class="controls">
+      <button data-f="step">Step</button>
+      <button data-f="sigmoid">Sigmoid</button>
+      <button data-f="relu">ReLU</button>
+      <button data-f="silu">SiLU</button>
+      <label><input type="checkbox" id="a_all"> แสดงทุกตัวจาง ๆ</label>
+      <label><input type="checkbox" id="a_slope" checked> แสดงความชัน</label>
+    </div>
+    <canvas id="a_plot" width="640" height="360" style="width:100%;cursor:ew-resize"></canvas>
+    <div class="controls"><label>z <input type="range" id="a_x" min="-4" max="4" step="0.01" style="width:260px"> <span class="mono" id="a_xv"></span></label></div>
+    <div class="table-wrap"><table id="a_table"></table></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>Step: เส้นสัมผัสแบนราบทุกจุด (ความชัน 0) ยกเว้นตรง z = 0 ที่กระโดด ไม่มีจุดไหนบอกได้ว่า "ขยับ z ไปทางนี้แล้วดีขึ้น"</li>
+        <li>Sigmoid: ลากไป z = ±4 ความชันเหลือเพียงประมาณ 0.018 สัญญาณสำหรับการเรียนรู้จึงอ่อนมาก</li>
+        <li>ReLU: ฝั่งลบทั้งหมดได้ 0 และความชัน 0 ส่วน SiLU ที่ z = −1 ยังได้ −0.27 และความชันยังไม่เป็นศูนย์</li>
+        <li>SiLU มีจุดต่ำสุดประมาณ −0.278 ที่ z ≈ −1.28 แล้วค่อย ๆ กลับเข้าหา 0 ไม่ได้ตัดทิ้งทันทีแบบ ReLU</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>2.3 ต่อนิวรอนเป็นชั้น และทำไมต้องมี activation</h2>
+  <p>
+    นิวรอนตัวเดียวสร้างได้แค่เส้นแบ่งตรง ๆ หนึ่งเส้น ถ้านำนิวรอนหลายตัวมารับอินพุตชุดเดียวกัน จะได้ <strong>ชั้น (layer)</strong>
+    และถ้านำผลลัพธ์ของชั้นหนึ่งไปเป็นอินพุตของอีกชั้น ก็จะได้ <strong>เครือข่าย (network)</strong> ชั้นที่อยู่ตรงกลางเรียกว่า <strong>ชั้นซ่อน (hidden layer)</strong>
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 560 250" width="560" role="img" aria-label="เครือข่าย 2-3-1">
+      <style>.l{font:14px Sarabun,sans-serif;text-anchor:middle}</style>
+      <g stroke="#9aa5b1" stroke-width="1.5">
+        <line x1="90" y1="85" x2="270" y2="50"/><line x1="90" y1="85" x2="270" y2="125"/><line x1="90" y1="85" x2="270" y2="200"/>
+        <line x1="90" y1="165" x2="270" y2="50"/><line x1="90" y1="165" x2="270" y2="125"/><line x1="90" y1="165" x2="270" y2="200"/>
+        <line x1="290" y1="50" x2="460" y2="125"/><line x1="290" y1="125" x2="460" y2="125"/><line x1="290" y1="200" x2="460" y2="125"/>
+      </g>
+      <circle cx="80" cy="85" r="22" fill="#fdecea" stroke="#d6453d" stroke-width="2"/><text class="l" x="80" y="90">R</text>
+      <circle cx="80" cy="165" r="22" fill="#e8f6ed" stroke="#2f9e55" stroke-width="2"/><text class="l" x="80" y="170">G</text>
+      <g fill="#fdf6e3" stroke="#d9a520" stroke-width="2">
+        <circle cx="280" cy="50" r="22"/><circle cx="280" cy="125" r="22"/><circle cx="280" cy="200" r="22"/>
+      </g>
+      <text class="l" x="280" y="55">h₁</text><text class="l" x="280" y="130">h₂</text><text class="l" x="280" y="205">h₃</text>
+      <circle cx="470" cy="125" r="24" fill="#fff" stroke="#333" stroke-width="2"/><text class="l" x="470" y="130">y</text>
+      <text class="l" x="80" y="232" fill="#666">ชั้นอินพุต</text>
+      <text class="l" x="280" y="245" fill="#666">ชั้นซ่อน (3 นิวรอน)</text>
+      <text class="l" x="470" y="175" fill="#666">ชั้นเอาต์พุต</text>
+    </svg>
+    <figcaption>รูปที่ 2.2 นิวรอนแต่ละตัวในชั้นซ่อนเป็นเส้นแบ่งของตัวเอง ชั้นเอาต์พุตนำผลของทั้งสามเส้นมารวมกัน จึงสร้างพื้นที่ที่ซับซ้อนกว่าเส้นตรงได้ เช่น "แถบ" ที่หนีบส้มไว้ตรงกลาง</figcaption>
+  </figure>
+
+  <h3>ถ้าไม่มี activation จะเกิดอะไรขึ้น</h3>
+  <p>
+    ลองคิดด้วยอินพุตตัวเดียว x นิวรอนในชั้นซ่อนคำนวณ h = w·x + b (ไม่มี f) แล้วชั้นเอาต์พุตคำนวณ y = v·h + c แทนค่าเข้าไปจะได้
+  </p>
+  <pre><code>y = v·(w·x + b) + c = (v·w)·x + (v·b + c) = A·x + B</code></pre>
+  <p>
+    ผลลัพธ์ยังเป็นเส้นตรงอยู่ดี ไม่ว่าจะซ้อนกี่ชั้นหรือมีนิวรอนกี่ตัว ทุกอย่างยุบรวมเหลือ "A·x + B" ชั้นเดียว
+    การเพิ่มชั้นจึงไม่ได้ช่วยอะไรเลย <strong>activation ที่ไม่เป็นเชิงเส้น (non-linear) คือสิ่งที่ทำให้แต่ละชั้น "งอ" เส้นได้</strong>
+    และการงอหลายครั้งต่อกันทำให้เครือข่ายสร้างรูปทรงซับซ้อนได้ ซิมมูเลชั่นด้านล่างให้เห็นเรื่องนี้กับตา
+  </p>
+
+  <!-- ---------- ซิม 2.3 ---------- -->
+  <div class="sim" id="sim23">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 2.3 สามนิวรอนรวมกันได้รูปอะไร</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองเลือก "ไม่มี activation" แล้วกดสุ่มหรือเลื่อน slider กี่ครั้งก็ได้ แล้วสังเกตว่าเส้นดำได้รูปอะไร จากนั้นสลับเป็น ReLU แล้วกด "สร้างเนิน"</p>
+    <div class="controls">
+      activation:
+      <button data-act2="none">ไม่มี (เชิงเส้น)</button>
+      <button data-act2="relu">ReLU</button>
+      <button data-act2="silu">SiLU</button>
+      &nbsp;<button id="m_rand">สุ่มน้ำหนัก</button>
+      <button id="m_bump">สร้างเนิน</button>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col" style="flex-basis:380px">
+        <canvas id="m_plot" width="480" height="340" style="width:100%"></canvas>
+      </div>
+      <div class="sim-col" style="flex-basis:220px">
+        <div id="m_net"></div>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="m_sliders"></table>
+    </div>
+    <div class="sim-out" id="m_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>โหมดไม่มี activation: เส้นสีจางของแต่ละนิวรอนเป็นเส้นตรง และผลรวม (เส้นดำ) ก็เป็นเส้นตรงทุกครั้ง ตัวเลข A และ B ด้านล่างคือเส้นตรงเส้นเดียวที่ใช้แทนทั้งเครือข่ายได้</li>
+        <li>โหมด ReLU: นิวรอนแต่ละตัวเป็นเส้น "หักงอ" ที่จุด z = −b/w การบวกเส้นหักงอหลายเส้นเข้าด้วยกันจึงได้รูปเนิน รูปตัว V หรือขั้นบันไดได้</li>
+        <li>โหมด SiLU: ได้รูปคล้าย ReLU แต่มุมโค้งมน นี่คือสิ่งที่เกิดขึ้นนับล้านครั้งใน YOLO11</li>
+        <li>ในแผนภาพเครือข่าย เส้นยิ่งหนายิ่งมีน้ำหนักมาก สีน้ำเงินคือบวก สีแดงคือลบ</li>
+      </ul>
+    </div>
+  </div>
+
+  <details class="think">
+    <summary>🤔 ลองคิดก่อน: ถ้าซ้อน 100 ชั้นโดยไม่มี activation จะได้ผลเหมือนกี่ชั้น</summary>
+    เหมือนชั้นเดียว ทุกชั้นเป็นการคูณและบวก การคูณและบวกต่อกันกี่ครั้งก็ยังเป็นการคูณและบวกครั้งเดียว (A·x + B)
+    ความ "ลึก" ของเครือข่ายจะมีความหมายก็ต่อเมื่อมี activation คั่นระหว่างชั้น
+  </details>
+
+  <h2>2.4 จากนิวรอนในบทนี้สู่ YOLO11</h2>
+  <p>
+    นิวรอนใน YOLO11 ไม่ได้รับแค่ R กับ G แต่ทำงานแบบเดียวกันทุกประการ คือคูณ รวม บวกไบแอส แล้วผ่าน activation
+    ความต่างคือนิวรอนแต่ละตัวมองเฉพาะ <em>พื้นที่เล็ก ๆ</em> ของภาพ (เช่น 3×3 พิกเซล × ทุกช่อง) และใช้ weight ชุดเดียวกันซ้ำทั่วทั้งภาพ
+    วิธีนี้เรียกว่า convolution ซึ่งจะเรียนในบทที่ 5
+  </p>
+  <figure>
+    <svg viewBox="0 0 620 120" width="620" role="img" aria-label="บล็อก Conv ของ YOLO11">
+      <style>.b{font:15px Sarabun,sans-serif;text-anchor:middle;dominant-baseline:middle}.c{font:12px Sarabun,sans-serif;text-anchor:middle;fill:#666}</style>
+      <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#555"/></marker></defs>
+      <rect x="5" y="15" width="590" height="70" rx="10" fill="none" stroke="#bbb" stroke-dasharray="6 4"/>
+      <text class="c" x="300" y="105">บล็อก Conv หนึ่งบล็อกใน YOLO11 (ultralytics/nn/modules/conv.py)</text>
+      <rect x="25" y="30" width="150" height="40" rx="6" fill="#e9effb" stroke="#3b6fd6"/><text class="b" x="100" y="50">Conv2d (w·x)</text>
+      <line x1="175" y1="50" x2="225" y2="50" stroke="#555" marker-end="url(#a3)"/>
+      <rect x="227" y="30" width="150" height="40" rx="6" fill="#eef8f0" stroke="#3f9d5a"/><text class="b" x="302" y="50">BatchNorm (+b)</text>
+      <line x1="377" y1="50" x2="427" y2="50" stroke="#555" marker-end="url(#a3)"/>
+      <rect x="429" y="30" width="150" height="40" rx="6" fill="#fdf6e3" stroke="#d9a520"/><text class="b" x="504" y="50">SiLU (f)</text>
+    </svg>
+    <figcaption>รูปที่ 2.3 บล็อก Conv = Conv2d → BatchNorm → SiLU ตรงกับ y = f(w·x + b) ของบทนี้ (Conv2d ใน YOLO11 ตั้ง bias=False เพราะ BatchNorm ทำหน้าที่บวกค่าคงที่แทน รายละเอียด BatchNorm อยู่ในบทที่ 6)</figcaption>
+  </figure>
+
+  <p>ตรวจจากโมเดล <code>yolo11n-seg.pt</code> จริงได้ตัวเลขดังนี้</p>
+  <ul>
+    <li>มีบล็อก Conv <strong>90 บล็อก</strong> โดย <strong>86 บล็อกใช้ SiLU</strong></li>
+    <li>อีก 4 บล็อกไม่มี activation อยู่ในส่วน attention ของบล็อก C2PSA (บทที่ 9)</li>
+    <li>ชั้นสุดท้ายของ Head เป็น Conv2d ธรรมดา <strong>ไม่มี activation</strong> เพราะต้องส่งตัวเลขดิบออกมา เช่น ระยะขอบกล่อง ซึ่งต้องเป็นค่าเท่าไรก็ได้</li>
+    <li>คะแนนของแต่ละคลาสถูกส่งผ่าน <strong>sigmoid</strong> ตอนถอดรหัสเอาต์พุต เพื่อให้กลายเป็นความมั่นใจ 0–1 ซึ่งก็คือค่า <code>conf</code> ที่จะเรียนในบทที่ 7</li>
+    <li>ทั้งโมเดลมีตัวเลขที่เรียนรู้ได้ (parameters) <strong>2,876,848 ตัว</strong> ส่วนใหญ่คือ weight ของ convolution ซึ่งเป็นตัวเลขชนิดเดียวกับ w₁, w₂ ในซิม 2.1</li>
+  </ul>
+  <details class="think">
+    <summary>ดูโค้ดจริงของบล็อก Conv (3 บรรทัด ข้ามได้)</summary>
+<pre><code>default_act = nn.SiLU()                                    <span class="cmt"># activation เริ่มต้น</span>
+self.conv = nn.Conv2d(c1, c2, k, s, ..., bias=False)
+def forward(self, x): return self.act(self.bn(self.conv(x)))   <span class="cmt"># f(BN(w·x))</span></code></pre>
+  </details>
+
+  <!-- ===================== 5. อยู่ตรงไหน ===================== -->
+  <h2>🔗 อยู่ตรงไหนใน YOLO11-seg</h2>
+  <div id="pipe"></div>
+  <p>
+    นิวรอนและ SiLU อยู่ <strong>ทุกที่</strong> ตั้งแต่ Backbone, Neck ไปจนถึง Head บล็อก Conv ทุกบล็อกคือ Conv2d → BatchNorm → SiLU
+    เมื่อเห็นกล่อง "Conv" ในผังสถาปัตยกรรมบทที่ 9 ให้นึกถึงนิวรอนนับพันตัวในบทนี้ที่ทำงานพร้อมกัน
+    ส่วน sigmoid ปรากฏตอนปลายทาง คือขั้นถอดรหัสที่เปลี่ยนคะแนนคลาสเป็นความมั่นใจ
+  </p>
+
+  <!-- ===================== 6. สรุป ===================== -->
+  <h2>สรุปท้ายบท</h2>
+  <ul>
+    <li>นิวรอนคำนวณ y = f(w·x + b): คูณอินพุตด้วย weight, รวมกัน, บวก bias, แล้วผ่าน activation</li>
+    <li>ในเชิงภาพ นิวรอนหนึ่งตัวคือเส้นแบ่งตรง ๆ หนึ่งเส้น: w หมุนเส้น, b เลื่อนเส้น</li>
+    <li>สิ่งที่โมเดลเรียนรู้คือค่า w และ b ทั้งหมด yolo11n-seg มี 2,876,848 ค่า</li>
+    <li>Step ใช้เทรนไม่ได้เพราะความชันเป็น 0, Sigmoid อิ่มตัวที่ปลาย, ReLU ตายฝั่งลบ, SiLU = z·σ(z) โค้งเรียบและฝั่งลบยังมีความชัน</li>
+    <li>ถ้าไม่มี activation ซ้อนกี่ชั้นก็ยุบเหลือ A·x + B ชั้นเดียว activation ที่ไม่เป็นเชิงเส้นทำให้เครือข่ายงอเส้นและสร้างรูปซับซ้อนได้</li>
+    <li>YOLO11 ใช้บล็อก Conv = Conv2d → BatchNorm → SiLU (86 จาก 90 บล็อกใน yolo11n-seg) และใช้ sigmoid เปลี่ยนคะแนนคลาสเป็นความมั่นใจ</li>
+  </ul>
+
+  <!-- ===================== 7. แบบทดสอบ ===================== -->
+  <h2>แบบทดสอบท้ายบท</h2>
+  <p class="small muted">กดเลือกคำตอบเพื่อดูเฉลยและคำอธิบายทันที</p>
+  <div id="quiz"></div>
+
+  <!-- ===================== 8. อ้างอิง ===================== -->
+  <h2>เอกสารอ้างอิง</h2>
+  <ul class="refs">
+    <li>Elfwing, S., Uchibe, E., &amp; Doya, K. (2018). Sigmoid-weighted linear units for neural network function approximation in reinforcement learning. <em>Neural Networks, 107</em>, 3–11. https://doi.org/10.1016/j.neunet.2017.12.012</li>
+    <li>Goodfellow, I., Bengio, Y., &amp; Courville, A. (2016). <em>Deep learning</em>. MIT Press. https://www.deeplearningbook.org</li>
+    <li>Jocher, G., &amp; Qiu, J. (2024). <em>Ultralytics YOLO11</em> [Computer software]. Ultralytics. https://github.com/ultralytics/ultralytics</li>
+    <li>Sanderson, G. (2017). <em>Neural networks</em> [Video series]. 3Blue1Brown. https://www.3blue1brown.com/topics/neural-networks</li>
+  </ul>
+
+  <footer>
+    ตัวเลขของ YOLO11 ในบทนี้ได้จากการโหลด <code>yolo11n-seg.pt</code> และนับโมดูลจริงด้วย <strong>ultralytics 8.4.2</strong> (อ่าน source <code>nn/modules/conv.py</code>, <code>nn/modules/head.py</code>)
+    · <a href="../chapter1/">← บทที่ 1</a> · <a href="../">สารบัญ</a> · บทถัดไป: <a href="../chapter3/">บทที่ 3 Loss และ Gradient Descent →</a>
+  </footer>
+</main>
+
+<script src="../assets/common.js"></script>
+<script>
+const sigmoid = z => 1 / (1 + Math.exp(-z));
+const ACT = {
+  step:    { name: 'Step',    f: z => (z >= 0 ? 1 : 0), d: z => 0, color: '#7b61a8' },
+  sigmoid: { name: 'Sigmoid', f: sigmoid, d: z => sigmoid(z) * (1 - sigmoid(z)), color: '#3b6fd6' },
+  relu:    { name: 'ReLU',    f: z => Math.max(0, z), d: z => (z > 0 ? 1 : 0), color: '#2f9e55' },
+  silu:    { name: 'SiLU',    f: z => z * sigmoid(z), d: z => sigmoid(z) * (1 + z * (1 - sigmoid(z))), color: '#b4441e' },
+};
+const fmt = (v, n = 2) => (Math.abs(v) < 1e-9 ? 0 : v).toFixed(n);
+
+// เตรียม canvas ให้คมบนจอความละเอียดสูง แต่ยังวาดด้วยพิกัดเดิม
+function hiDPI(cv) {
+  const r = window.devicePixelRatio || 1, w = cv.width, h = cv.height;
+  if (r !== 1 && !cv.dataset.dpi) {
+    cv.width = w * r; cv.height = h * r; cv.dataset.dpi = 1;
+    cv.getContext('2d').scale(r, r);
+  }
+  return { ctx: cv.getContext('2d'), W: w, H: h };
+}
+function toCanvas(cv, e, W, H) {
+  const rect = cv.getBoundingClientRect();
+  return [(e.clientX - rect.left) / rect.width * W, (e.clientY - rect.top) / rect.height * H];
+}
+
+/* =========================================================
+   ซิม 2.1 นิวรอนตัวเดียว
+   ========================================================= */
+(function () {
+  const root = document.getElementById('sim21');
+  const cv = document.getElementById('n_plane');
+  const { ctx, W } = hiDPI(cv);
+  const P0 = 40, SZ = W - P0 - 12, TOP = 12;      // พื้นที่กราฟ
+  const toPx = (r, g) => [P0 + r * SZ, TOP + (1 - g) * SZ];
+  const inputs = { w1: 'n_w1', w2: 'n_w2', b: 'n_b' };
+
+  // ---- เก็บพิกเซลจริงจากภาพผลไม้ ----
+  const N = 320, img = makeFruitImage(N, N).getContext('2d').getImageData(0, 0, N, N).data;
+  const { X, Y, L } = sceneFrame(N, N);
+  const rand = rng(7);
+  const getPx = (u, v) => {
+    const x = Math.round(X(u)), y = Math.round(Y(v)), i = (y * N + x) * 4;
+    return [img[i], img[i + 1], img[i + 2]];
+  };
+  function disc(u, v, r, n) {
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const a = rand() * Math.PI * 2, d = Math.sqrt(rand()) * r;
+      out.push(getPx(u + Math.cos(a) * d, v + Math.sin(a) * d));
+    }
+    return out;
+  }
+  function banana(n) {
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const t = 0.65 + rand() * 0.2, s = 1 - t;
+      const u = s * s * 0.16 + 2 * s * t * 0.36 + t * t * 0.62;
+      const v = s * s * 0.40 + 2 * s * t * 0.52 + t * t * 0.30;
+      out.push(getPx(u + (rand() - 0.5) * 0.04, v + (rand() - 0.5) * 0.04));
+    }
+    return out;
+  }
+  const red = [...disc(0.58, 0.55, 0.045, 20), ...disc(0.40, 0.60, 0.025, 10)];
+  const green = disc(0.79, 0.57, 0.035, 30);
+  const orange = disc(0.28, 0.56, 0.045, 30);
+  const yellow = banana(20);
+  const mk = (arr, y, name) => arr.map(c => ({ r: c[0] / 255, g: c[1] / 255, c, y, name }));
+  const DATA = {
+    A: { yes: 'แอปเปิลแดง', pts: [...mk(red, 1, 'แอปเปิลแดง'), ...mk(green, 0, 'แอปเปิลเขียว')], def: { w1: 2, w2: 2, b: -2 } },
+    B: { yes: 'ส้ม', pts: [...mk(orange, 1, 'ส้ม'), ...mk(red.slice(0, 20), 0, 'แอปเปิลแดง'), ...mk(yellow, 0, 'กล้วย')], def: { w1: 0, w2: 6, b: -2 } },
+  };
+  let st;
+
+  function draw() {
+    const { w1, w2, b } = st, ds = DATA[st.ds];
+    // พื้นหลังไล่สีตาม sigmoid(z)
+    const step = 4;
+    for (let py = 0; py < SZ; py += step) for (let px = 0; px < SZ; px += step) {
+      const r = (px + step / 2) / SZ, g = 1 - (py + step / 2) / SZ;
+      const s = sigmoid(w1 * r + w2 * g + b);
+      const c0 = [236, 236, 236], c1 = [203, 222, 250];
+      ctx.fillStyle = `rgb(${c0.map((v, i) => Math.round(v + (c1[i] - v) * s)).join(',')})`;
+      ctx.fillRect(P0 + px, TOP + py, step, step);
+    }
+    ctx.clearRect(0, 0, P0, W); ctx.clearRect(0, TOP + SZ, W, W);
+    // แกน
+    ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.strokeRect(P0, TOP, SZ, SZ);
+    ctx.fillStyle = '#444'; ctx.font = '12px Sarabun, sans-serif'; ctx.textAlign = 'center';
+    for (const t of [0, 0.5, 1]) {
+      const [x] = toPx(t, 0), [, y] = toPx(0, t);
+      ctx.fillText(t, x, TOP + SZ + 14); ctx.textAlign = 'right'; ctx.fillText(t, P0 - 5, y + 4); ctx.textAlign = 'center';
+    }
+    ctx.fillText('R (แดง) →', P0 + SZ / 2, TOP + SZ + 28);
+    ctx.save(); ctx.translate(12, TOP + SZ / 2); ctx.rotate(-Math.PI / 2); ctx.fillText('G (เขียว) →', 0, 0); ctx.restore();
+
+    // เส้นแบ่ง z = 0
+    ctx.save(); ctx.beginPath(); ctx.rect(P0, TOP, SZ, SZ); ctx.clip();
+    let seg = null;
+    if (Math.abs(w2) > 1e-6) {
+      const g0 = -(w1 * -1 + b) / w2, g1 = -(w1 * 2 + b) / w2;
+      seg = [toPx(-1, g0), toPx(2, g1)];
+    } else if (Math.abs(w1) > 1e-6) {
+      const r0 = -b / w1; seg = [toPx(r0, -1), toPx(r0, 2)];
+    }
+    if (seg) {
+      ctx.strokeStyle = '#1f2933'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(...seg[0]); ctx.lineTo(...seg[1]); ctx.stroke();
+      // ลูกศรตั้งฉาก ชี้ฝั่ง "ใช่": จุดบนเส้นที่ใกล้กลางกราฟที่สุด
+      const n2 = w1 * w1 + w2 * w2, k = -(w1 * 0.5 + w2 * 0.5 + b) / n2;
+      const [ax, ay] = toPx(0.5 + k * w1, 0.5 + k * w2);
+      const len = Math.sqrt(n2), dx = w1 / len * 34, dy = -w2 / len * 34;
+      ctx.strokeStyle = '#3b6fd6'; ctx.fillStyle = '#3b6fd6'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax + dx, ay + dy); ctx.stroke();
+      const an = Math.atan2(dy, dx);
+      ctx.beginPath(); ctx.moveTo(ax + dx, ay + dy);
+      ctx.lineTo(ax + dx - 9 * Math.cos(an - 0.4), ay + dy - 9 * Math.sin(an - 0.4));
+      ctx.lineTo(ax + dx - 9 * Math.cos(an + 0.4), ay + dy - 9 * Math.sin(an + 0.4)); ctx.fill();
+      ctx.font = 'bold 12px Sarabun, sans-serif';
+      ctx.fillText('ใช่', ax + dx * 1.45, ay + dy * 1.45 + 4);
+    }
+    ctx.restore();
+
+    // จุดข้อมูล
+    let ok = 0;
+    ds.pts.forEach((p, i) => {
+      const [x, y] = toPx(p.r, p.g), pred = w1 * p.r + w2 * p.g + b > 0 ? 1 : 0, right = pred === p.y;
+      if (right) ok++;
+      ctx.lineWidth = 1.5;
+      if (p.y === 1) {
+        ctx.fillStyle = `rgb(${p.c})`; ctx.strokeStyle = '#000';
+        ctx.beginPath(); ctx.arc(x, y, 5.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      } else {
+        ctx.strokeStyle = '#000'; ctx.lineWidth = 4.5;
+        ctx.beginPath(); ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5); ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5); ctx.stroke();
+        ctx.strokeStyle = `rgb(${p.c})`; ctx.lineWidth = 2.5; ctx.stroke();
+      }
+      if (!right) { ctx.strokeStyle = 'rgba(220,0,0,0.75)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke(); }
+      if (i === st.sel) { ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2); ctx.stroke(); }
+    });
+    const n = ds.pts.length;
+    document.getElementById('n_score').innerHTML =
+      `โจทย์: ● = ${ds.yes} (ใช่), ✕ = อย่างอื่น<br>ทำนายถูก <b>${ok} / ${n}</b> จุด ` +
+      (ok === n ? '🎉 แยกได้ครบ!' : `<span class="muted">(วงแดง = ทำนายผิด)</span>`);
+    drawDiag(ds.pts[st.sel]);
+  }
+
+  function drawDiag(p) {
+    const { w1, w2, b } = st, z = w1 * p.r + w2 * p.g + b, y = sigmoid(z);
+    const col = v => (v >= 0 ? '#3b6fd6' : '#d6453d'), th = v => 1 + Math.min(Math.abs(v), 12) * 0.6;
+    document.getElementById('n_diag').innerHTML = `
+    <svg viewBox="0 0 330 200" width="100%" style="max-width:360px">
+      <style>.t{font:13px Consolas,monospace;text-anchor:middle;dominant-baseline:middle}.u{font:12px Sarabun,sans-serif;text-anchor:middle}</style>
+      <line x1="62" y1="45" x2="160" y2="95" stroke="${col(w1)}" stroke-width="${th(w1)}"/>
+      <line x1="62" y1="155" x2="160" y2="105" stroke="${col(w2)}" stroke-width="${th(w2)}"/>
+      <text class="t" x="105" y="52" fill="${col(w1)}">×${fmt(w1, 1)}</text>
+      <text class="t" x="105" y="150" fill="${col(w2)}">×${fmt(w2, 1)}</text>
+      <circle cx="38" cy="45" r="26" fill="rgb(${p.c})" stroke="#d6453d" stroke-width="2"/>
+      <text class="t" x="38" y="38" fill="${p.c[0] * .3 + p.c[1] * .6 > 140 ? '#000' : '#fff'}">R</text>
+      <text class="t" x="38" y="54" fill="${p.c[0] * .3 + p.c[1] * .6 > 140 ? '#000' : '#fff'}">${fmt(p.r)}</text>
+      <circle cx="38" cy="155" r="26" fill="rgb(${p.c})" stroke="#2f9e55" stroke-width="2"/>
+      <text class="t" x="38" y="148" fill="${p.c[0] * .3 + p.c[1] * .6 > 140 ? '#000' : '#fff'}">G</text>
+      <text class="t" x="38" y="164" fill="${p.c[0] * .3 + p.c[1] * .6 > 140 ? '#000' : '#fff'}">${fmt(p.g)}</text>
+      <circle cx="180" cy="100" r="24" fill="#fff" stroke="#333" stroke-width="2"/>
+      <text class="t" x="180" y="100" style="font-size:20px">Σ</text>
+      <text class="t" x="180" y="62">+b ${fmt(b, 1)}</text>
+      <line x1="204" y1="100" x2="236" y2="100" stroke="#555"/>
+      <rect x="236" y="82" width="34" height="36" rx="5" fill="#fdf6e3" stroke="#d9a520"/>
+      <text class="t" x="253" y="100">σ</text>
+      <line x1="270" y1="100" x2="290" y2="100" stroke="#555"/>
+      <text class="t" x="310" y="92">y</text><text class="t" x="310" y="110">${fmt(y)}</text>
+      <text class="u" x="165" y="190">${p.name}: ทำนายว่า "${y > 0.5 ? 'ใช่' : 'ไม่ใช่'}" (${y > 0.5 ? 'มั่นใจ' : 'ความมั่นใจว่าใช่'} ${Math.round(y * 100)}%)</text>
+    </svg>
+    <div class="sim-out small mono">z = ${fmt(w1, 1)}×${fmt(p.r)} + (${fmt(w2, 1)})×${fmt(p.g)} + (${fmt(b, 1)}) = ${fmt(z)}<br>y = σ(${fmt(z)}) = ${fmt(y, 3)}</div>`;
+  }
+
+  function sync() {
+    for (const k in inputs) {
+      document.getElementById(inputs[k]).value = st[k];
+      document.getElementById(inputs[k] + 'v').textContent = (+st[k]).toFixed(1);
+    }
+    root.querySelectorAll('[data-ds]').forEach(b => b.classList.toggle('on', b.dataset.ds === st.ds));
+  }
+  function setDs(ds) { st = { ds, ...DATA[ds].def, sel: 0 }; sync(); draw(); }
+  for (const k in inputs) document.getElementById(inputs[k]).addEventListener('input', e => { st[k] = +e.target.value; sync(); draw(); });
+  root.querySelectorAll('[data-ds]').forEach(b => b.addEventListener('click', () => setDs(b.dataset.ds)));
+  root.querySelector('[data-act=reset]').addEventListener('click', () => setDs(st.ds));
+  function pick(e) {
+    const [mx, my] = toCanvas(cv, e, W, W);
+    let best = -1, bd = 196;
+    DATA[st.ds].pts.forEach((p, i) => { const [x, y] = toPx(p.r, p.g), d = (x - mx) ** 2 + (y - my) ** 2; if (d < bd) { bd = d; best = i; } });
+    if (best >= 0 && best !== st.sel) { st.sel = best; draw(); }
+  }
+  cv.addEventListener('pointermove', pick);
+  cv.addEventListener('pointerdown', pick);
+  setDs('A');
+})();
+
+/* =========================================================
+   แกลเลอรีกราฟ activation (รูปประกอบ)
+   ========================================================= */
+(function () {
+  const g = document.getElementById('actGallery');
+  for (const k of ['step', 'sigmoid', 'relu', 'silu']) {
+    const a = ACT[k], box = document.createElement('div');
+    box.style.textAlign = 'center';
+    const cv = document.createElement('canvas'); cv.width = 180; cv.height = 130; cv.style.width = '100%'; cv.style.maxWidth = '220px';
+    box.appendChild(cv);
+    const cap = document.createElement('div'); cap.className = 'small'; cap.innerHTML = `<b>${a.name}</b>`; box.appendChild(cap);
+    g.appendChild(box);
+    const { ctx, W, H } = hiDPI(cv);
+    const sx = x => (x + 4) / 8 * W, sy = y => H - 14 - (y + 1) / 5 * (H - 20);
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#ccc'; ctx.beginPath(); ctx.moveTo(0, sy(0)); ctx.lineTo(W, sy(0)); ctx.moveTo(sx(0), 0); ctx.lineTo(sx(0), H); ctx.stroke();
+    ctx.strokeStyle = a.color; ctx.lineWidth = 2.5; ctx.beginPath();
+    for (let i = 0; i <= 200; i++) {
+      const x = -4 + 8 * i / 200, y = a.f(x);
+      if (k === 'step' && i > 0 && (-4 + 8 * (i - 1) / 200) < 0 && x >= 0) ctx.moveTo(sx(x), sy(y));
+      i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y));
+    }
+    ctx.stroke();
+    ctx.fillStyle = '#888'; ctx.font = '10px Sarabun, sans-serif';
+    ctx.fillText('z', W - 10, sy(0) - 4); ctx.fillText('1', sx(0) + 3, sy(1) + 3);
+    ctx.strokeStyle = '#ddd'; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, sy(1)); ctx.lineTo(W, sy(1)); ctx.stroke(); ctx.setLineDash([]);
+  }
+})();
+
+/* =========================================================
+   ซิม 2.2 สนามกราฟ activation
+   ========================================================= */
+(function () {
+  const root = document.getElementById('sim22');
+  const cv = document.getElementById('a_plot');
+  const { ctx, W, H } = hiDPI(cv);
+  const xs = document.getElementById('a_x'), allBox = document.getElementById('a_all'), slopeBox = document.getElementById('a_slope');
+  const XR = [-4, 4], YR = [-1.2, 4.2];
+  const sx = x => 40 + (x - XR[0]) / (XR[1] - XR[0]) * (W - 55);
+  const sy = y => 10 + (YR[1] - y) / (YR[1] - YR[0]) * (H - 40);
+  const inv = px => XR[0] + (px - 40) / (W - 55) * (XR[1] - XR[0]);
+  let st;
+
+  function curve(a, fn, dash, width, color) {
+    ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash);
+    ctx.beginPath();
+    let prev = null;
+    for (let i = 0; i <= 400; i++) {
+      const x = XR[0] + (XR[1] - XR[0]) * i / 400, y = fn(x);
+      const jump = a === ACT.step && prev !== null && prev < 0 && x >= 0 && fn === a.f;
+      (i === 0 || jump) ? ctx.moveTo(sx(x), sy(y)) : ctx.lineTo(sx(x), sy(y));
+      prev = x;
+    }
+    ctx.stroke(); ctx.restore();
+  }
+
+  function draw() {
+    const a = ACT[st.f], x = st.x;
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    ctx.save(); ctx.beginPath(); ctx.rect(40, 10, W - 55, H - 40); ctx.clip();
+    // grid
+    ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
+    for (let gx = -4; gx <= 4; gx++) { ctx.beginPath(); ctx.moveTo(sx(gx), 0); ctx.lineTo(sx(gx), H); ctx.stroke(); }
+    for (let gy = -1; gy <= 4; gy++) { ctx.beginPath(); ctx.moveTo(0, sy(gy)); ctx.lineTo(W, sy(gy)); ctx.stroke(); }
+    ctx.strokeStyle = '#999';
+    ctx.beginPath(); ctx.moveTo(0, sy(0)); ctx.lineTo(W, sy(0)); ctx.moveTo(sx(0), 0); ctx.lineTo(sx(0), H); ctx.stroke();
+    if (st.all) for (const k in ACT) if (k !== st.f) curve(ACT[k], ACT[k].f, [], 1.5, ACT[k].color + '55');
+    if (st.slope) curve(a, a.d, [5, 4], 1.5, a.color + 'aa');
+    curve(a, a.f, [], 3, a.color);
+    // จุดและเส้นสัมผัส
+    const y = a.f(x), d = a.d(x);
+    if (st.slope) {
+      ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(sx(x - 1), sy(y - d)); ctx.lineTo(sx(x + 1), sy(y + d)); ctx.stroke();
+    }
+    ctx.setLineDash([3, 3]); ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(sx(x), sy(0)); ctx.lineTo(sx(x), sy(y)); ctx.lineTo(sx(0), sy(y)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#ff00ff'; ctx.beginPath(); ctx.arc(sx(x), sy(y), 6, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    // ป้ายแกน
+    ctx.fillStyle = '#555'; ctx.font = '12px Sarabun, sans-serif'; ctx.textAlign = 'center';
+    for (let gx = -4; gx <= 4; gx++) ctx.fillText(gx, sx(gx), H - 16);
+    ctx.textAlign = 'right';
+    for (let gy = -1; gy <= 4; gy++) ctx.fillText(gy, 34, sy(gy) + 4);
+    ctx.textAlign = 'center'; ctx.fillText('z (อินพุตของ activation)', sx(0), H - 2);
+    ctx.textAlign = 'left'; ctx.fillStyle = a.color; ctx.font = 'bold 14px Sarabun, sans-serif';
+    ctx.fillText(`${a.name}(${fmt(x)}) = ${fmt(y, 3)}`, 50, 28);
+    if (st.slope) { ctx.fillStyle = '#ff00ff'; ctx.font = '13px Sarabun, sans-serif'; ctx.fillText(`ความชัน = ${fmt(d, 3)}  (เส้นประ = กราฟความชัน)`, 50, 46); }
+
+    xs.value = x; document.getElementById('a_xv').textContent = fmt(x);
+    document.getElementById('a_table').innerHTML =
+      '<tr><th></th>' + Object.values(ACT).map(o => `<th style="color:${o.color}">${o.name}</th>`).join('') + '</tr>' +
+      `<tr><td>f(${fmt(x)})</td>` + Object.entries(ACT).map(([k, o]) => `<td class="mono"${k === st.f ? ' style="font-weight:700"' : ''}>${fmt(o.f(x), 3)}</td>`).join('') + '</tr>' +
+      `<tr><td>ความชัน</td>` + Object.entries(ACT).map(([k, o]) => `<td class="mono"${k === st.f ? ' style="font-weight:700"' : ''}>${k === 'step' && Math.abs(x) < 0.005 ? 'ไม่นิยาม' : fmt(o.d(x), 3)}</td>`).join('') + '</tr>';
+    root.querySelectorAll('[data-f]').forEach(b => b.classList.toggle('on', b.dataset.f === st.f));
+    allBox.checked = st.all; slopeBox.checked = st.slope;
+  }
+  root.querySelectorAll('[data-f]').forEach(b => b.addEventListener('click', () => { st.f = b.dataset.f; draw(); }));
+  allBox.addEventListener('change', () => { st.all = allBox.checked; draw(); });
+  slopeBox.addEventListener('change', () => { st.slope = slopeBox.checked; draw(); });
+  xs.addEventListener('input', () => { st.x = +xs.value; draw(); });
+  let drag = false;
+  const move = e => { const [px] = toCanvas(cv, e, W, H); st.x = Math.max(-4, Math.min(4, Math.round(inv(px) * 100) / 100)); draw(); };
+  cv.addEventListener('pointerdown', e => { drag = true; cv.setPointerCapture(e.pointerId); move(e); });
+  cv.addEventListener('pointermove', e => { if (drag) move(e); });
+  cv.addEventListener('pointerup', () => { drag = false; });
+  const reset = () => { st = { f: 'silu', x: -1, all: true, slope: true }; draw(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 2.3 สามนิวรอนรวมกัน
+   ========================================================= */
+(function () {
+  const root = document.getElementById('sim23');
+  const cv = document.getElementById('m_plot');
+  const { ctx, W, H } = hiDPI(cv);
+  const COLORS = ['#d9822b', '#7b61a8', '#2a9d8f'];
+  const R = 3;
+  const sx = x => 30 + (x + R) / (2 * R) * (W - 40), sy = y => 10 + (R - y) / (2 * R) * (H - 34);
+  const DEF = { act: 'none', n: [{ w: 1, b: 0.5, v: 1 }, { w: -0.8, b: 0.4, v: 0.7 }, { w: 0.6, b: -1, v: -1.2 }] };
+  const BUMP = [{ w: 1, b: 1, v: 1 }, { w: 1, b: 0, v: -2 }, { w: 1, b: -1, v: 1 }];
+  let st;
+  const f = z => (st.act === 'none' ? z : ACT[st.act].f(z));
+
+  // ตาราง slider
+  const tbl = document.getElementById('m_sliders');
+  tbl.innerHTML = '<tr><th>นิวรอน</th><th>w (คูณ x)</th><th>b</th><th>v (คูณก่อนรวม)</th></tr>' +
+    [0, 1, 2].map(i => `<tr><td style="color:${COLORS[i]};font-weight:700">h${'₁₂₃'[i]}</td>` +
+      ['w', 'b', 'v'].map(k => `<td><input type="range" min="-3" max="3" step="0.1" data-i="${i}" data-k="${k}" style="width:90px"> <span class="mono" data-o="${i}${k}"></span></td>`).join('') +
+      '</tr>').join('');
+  tbl.querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => {
+    st.n[+inp.dataset.i][inp.dataset.k] = +inp.value; draw();
+  }));
+
+  function draw() {
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
+    for (let g = -R; g <= R; g++) {
+      ctx.beginPath(); ctx.moveTo(sx(g), sy(R)); ctx.lineTo(sx(g), sy(-R)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx(-R), sy(g)); ctx.lineTo(sx(R), sy(g)); ctx.stroke();
+    }
+    ctx.strokeStyle = '#999';
+    ctx.beginPath(); ctx.moveTo(sx(-R), sy(0)); ctx.lineTo(sx(R), sy(0)); ctx.moveTo(sx(0), sy(R)); ctx.lineTo(sx(0), sy(-R)); ctx.stroke();
+    ctx.fillStyle = '#666'; ctx.font = '11px Sarabun, sans-serif'; ctx.textAlign = 'center';
+    for (let g = -R; g <= R; g++) if (g) ctx.fillText(g, sx(g), sy(0) + 13);
+    ctx.fillText('x', sx(R) - 6, sy(0) - 6);
+    ctx.save(); ctx.beginPath(); ctx.rect(30, 10, W - 40, H - 34); ctx.clip();
+    const line = (fn, color, width) => {
+      ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath();
+      for (let i = 0; i <= 300; i++) { const x = -R + 2 * R * i / 300; i ? ctx.lineTo(sx(x), sy(fn(x))) : ctx.moveTo(sx(x), sy(fn(x))); }
+      ctx.stroke();
+    };
+    st.n.forEach((n, i) => line(x => n.v * f(n.w * x + n.b), COLORS[i] + '99', 2));
+    line(x => st.n.reduce((s, n) => s + n.v * f(n.w * x + n.b), 0), '#111', 3.5);
+    ctx.restore();
+    ctx.textAlign = 'left'; ctx.font = '12px Sarabun, sans-serif'; ctx.fillStyle = '#111';
+    ctx.fillText('เส้นดำ = y (ผลรวม)   เส้นสี = v·h ของแต่ละนิวรอน', 36, H - 6);
+
+    // แผนภาพเครือข่าย
+    const col = v => (v >= 0 ? '#3b6fd6' : '#d6453d'), th = v => 0.8 + Math.abs(v) * 1.8;
+    const ys = [40, 110, 180];
+    document.getElementById('m_net').innerHTML = `
+      <svg viewBox="0 0 230 220" width="100%" style="max-width:260px">
+        <style>.t{font:13px Sarabun,sans-serif;text-anchor:middle;dominant-baseline:middle}</style>
+        ${st.n.map((n, i) => `<line x1="40" y1="110" x2="115" y2="${ys[i]}" stroke="${col(n.w)}" stroke-width="${th(n.w)}"/>
+          <line x1="115" y1="${ys[i]}" x2="195" y2="110" stroke="${col(n.v)}" stroke-width="${th(n.v)}"/>`).join('')}
+        <circle cx="30" cy="110" r="18" fill="#fff" stroke="#333" stroke-width="2"/><text class="t" x="30" y="110">x</text>
+        ${st.n.map((n, i) => `<circle cx="115" cy="${ys[i]}" r="20" fill="#fff" stroke="${COLORS[i]}" stroke-width="3"/>
+          <text class="t" x="115" y="${ys[i]}">${st.act === 'none' ? '—' : st.act === 'relu' ? 'ReLU' : 'SiLU'}</text>`).join('')}
+        <circle cx="205" cy="110" r="18" fill="#fff" stroke="#333" stroke-width="2"/><text class="t" x="205" y="110">y</text>
+      </svg>`;
+
+    // ตัวเลข
+    tbl.querySelectorAll('input').forEach(inp => {
+      const v = st.n[+inp.dataset.i][inp.dataset.k]; inp.value = v;
+      tbl.querySelector(`[data-o="${inp.dataset.i}${inp.dataset.k}"]`).textContent = v.toFixed(1);
+    });
+    const out = document.getElementById('m_out');
+    if (st.act === 'none') {
+      const A = st.n.reduce((s, n) => s + n.v * n.w, 0), B = st.n.reduce((s, n) => s + n.v * n.b, 0);
+      out.innerHTML = `ไม่มี activation: y = Σ v·(w·x + b) = (Σ v·w)·x + (Σ v·b)<br>` +
+        `A = ${st.n.map(n => `(${fmt(n.v, 1)})(${fmt(n.w, 1)})`).join(' + ')} = <b>${fmt(A)}</b>, ` +
+        `B = ${st.n.map(n => `(${fmt(n.v, 1)})(${fmt(n.b, 1)})`).join(' + ')} = <b>${fmt(B)}</b><br>` +
+        `→ ทั้งเครือข่ายเท่ากับเส้นตรงเส้นเดียว <b>y = ${fmt(A)}·x + ${fmt(B)}</b>`;
+    } else {
+      out.innerHTML = `${st.act === 'relu' ? 'ReLU' : 'SiLU'}: นิวรอนแต่ละตัวเริ่ม "หักงอ" ที่ z = 0 คือ x = −b/w → ` +
+        st.n.map((n, i) => `<span style="color:${COLORS[i]}">h${'₁₂₃'[i]}: ${Math.abs(n.w) < 1e-9 ? 'w = 0 (ไม่งอ)' : 'x = ' + fmt(-n.b / n.w)}</span>`).join(', ') +
+        '<br>ผลรวมของเส้นหักงอหลายเส้นจึงงอได้หลายจุด ไม่ใช่เส้นตรงอีกต่อไป';
+    }
+    root.querySelectorAll('[data-act2]').forEach(b => b.classList.toggle('on', b.dataset.act2 === st.act));
+  }
+  root.querySelectorAll('[data-act2]').forEach(b => b.addEventListener('click', () => { st.act = b.dataset.act2; draw(); }));
+  let rr = rng(11);
+  document.getElementById('m_rand').addEventListener('click', () => {
+    st.n = st.n.map(() => ({ w: Math.round((rr() * 6 - 3) * 10) / 10, b: Math.round((rr() * 6 - 3) * 10) / 10, v: Math.round((rr() * 6 - 3) * 10) / 10 }));
+    draw();
+  });
+  document.getElementById('m_bump').addEventListener('click', () => { st.n = BUMP.map(n => ({ ...n })); draw(); });
+  const reset = () => { st = { act: DEF.act, n: DEF.n.map(n => ({ ...n })) }; rr = rng(11); draw(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   🔗 และแบบทดสอบ
+   ========================================================= */
+renderPipeline(document.getElementById('pipe'), ['backbone', 'neck', 'head', 'decode']);
+
+initQuiz(document.getElementById('quiz'), [
+  {
+    q: 'นิวรอนมี x = (0.8, 0.2), w = (2, −1), b = −0.5 และใช้ ReLU ผลลัพธ์ y เท่าใด',
+    options: ['0.9', '1.4', '0', '2.3'],
+    answer: 0,
+    explain: 'z = 2(0.8) + (−1)(0.2) + (−0.5) = 1.6 − 0.2 − 0.5 = 0.9 และ ReLU(0.9) = 0.9 เพราะเป็นค่าบวก',
+  },
+  {
+    q: 'ReLU(−2) และ SiLU(−2) มีค่าเท่าใดตามลำดับ',
+    options: ['0 และ −0.238', '−2 และ −2', '0 และ 0', '2 และ 0.238'],
+    answer: 0,
+    explain: 'ReLU ตัดค่าลบเป็น 0 ส่วน SiLU(−2) = −2 × σ(−2) = −2 × 0.119 ≈ −0.238 ซึ่งยังเป็นค่าลบเล็ก ๆ ไม่ใช่ 0',
+  },
+  {
+    q: 'YOLO11 ใช้ activation ตัวใดในบล็อก Conv',
+    options: ['ReLU', 'Sigmoid', 'SiLU', 'Step'],
+    answer: 2,
+    explain: 'ใน ultralytics/nn/modules/conv.py บล็อก Conv ตั้ง default_act = nn.SiLU() และใน yolo11n-seg มี 86 จาก 90 บล็อกที่ใช้ SiLU',
+  },
+  {
+    q: 'ถ้าเครือข่าย 5 ชั้นไม่มี activation เลย ผลลัพธ์จะเป็นอย่างไร',
+    options: ['ทำงานเหมือน 5 ชั้นตามปกติ แค่ช้ากว่า', 'ยุบรวมเหลือฟังก์ชันเชิงเส้นชั้นเดียว (A·x + B)', 'ให้ผลลัพธ์เป็น 0 เสมอ', 'เทรนไม่ได้เพราะไม่มี weight'],
+    answer: 1,
+    explain: 'การคูณและบวกต่อกันหลายครั้งรวมเป็นการคูณและบวกครั้งเดียวได้เสมอ ความลึกจึงไม่มีประโยชน์ถ้าไม่มี activation ที่ไม่เป็นเชิงเส้นคั่น',
+  },
+  {
+    q: 'บนกราฟ R–G ในซิม 2.1 การเปลี่ยนค่า b อย่างเดียว (w คงเดิม) ทำให้เส้นแบ่งเปลี่ยนอย่างไร',
+    options: ['หมุนรอบจุดกำเนิด', 'เลื่อนขนานไปโดยไม่หมุน', 'โค้งงอ', 'ไม่เปลี่ยนเลย'],
+    answer: 1,
+    explain: 'ทิศของเส้นขึ้นกับอัตราส่วน w₁ : w₂ เท่านั้น b เปลี่ยนแค่ว่าเส้นอยู่ห่างจุดกำเนิดเท่าไร เส้นจึงเลื่อนขนาน',
+  },
+  {
+    q: 'เหตุใดจึงใช้ Step function เทรนเครือข่ายไม่ได้',
+    options: ['เพราะผลลัพธ์มีแค่ 0 กับ 1 ซึ่งน้อยเกินไป', 'เพราะความชันเป็น 0 ทุกจุด จึงบอกไม่ได้ว่าควรปรับ weight ไปทางไหน', 'เพราะคำนวณช้าที่สุด', 'เพราะให้ค่าติดลบได้'],
+    answer: 1,
+    explain: 'การเทรน (บทที่ 3) อาศัยความชันบอกทิศทางการปรับ Step แบนราบทุกจุด ขยับ z นิดหน่อยแล้วผลลัพธ์ไม่เปลี่ยน จึงไม่มีสัญญาณให้เรียนรู้',
+  },
+  {
+    q: 'ในโจทย์ "ส้ม vs (แอปเปิลแดง + กล้วย)" ทำไมนิวรอนตัวเดียวแยกได้ไม่ครบ',
+    options: ['เพราะสีส้มไม่มีค่า G', 'เพราะส้มอยู่ตรงกลางระหว่างสองกลุ่ม ต้องใช้สองเส้นหนีบ แต่นิวรอนหนึ่งตัวสร้างได้เส้นเดียว', 'เพราะ learning rate ไม่พอ', 'เพราะต้องใช้ ReLU แทน sigmoid'],
+    answer: 1,
+    explain: 'นิวรอนเดียวคือเส้นตรงเส้นเดียว แบ่งระนาบได้แค่สองฝั่ง ส้ม (G กลาง ๆ) ถูกขนาบด้วยแอปเปิลแดง (G ต่ำ) และกล้วย (G สูง) จึงต้องใช้นิวรอนอย่างน้อยสองตัวในชั้นซ่อน',
+  },
+  {
+    q: 'ใน YOLO11 sigmoid ถูกใช้ทำอะไร',
+    options: ['เป็น activation ของทุกบล็อก Conv', 'เปลี่ยนคะแนนของแต่ละคลาสให้เป็นความมั่นใจ 0–1 ตอนถอดรหัสเอาต์พุต', 'ย่อภาพให้เหลือ 640×640', 'ไม่ได้ใช้เลย'],
+    answer: 1,
+    explain: 'ใน nn/modules/head.py ขั้นถอดรหัสเรียก scores.sigmoid() ทำให้คะแนนคลาสกลายเป็นความมั่นใจ 0–1 (ค่า conf) ส่วนบล็อก Conv ใช้ SiLU',
+  },
+]);
+</script>
+</body>
+</html>
