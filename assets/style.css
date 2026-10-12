@@ -117,7 +117,7 @@ button.reset { color: var(--accent); border-color: var(--accent); }
 .quiz-score { font-weight: 700; font-size: 1.05rem; }
 
 /* อ้างอิง */
-.refs li { margin-bottom: 0.5em; padding-left: 2em; text-indent: -2em; list-style: none; }
+.refs li { margin-bottom: 0.5em; padding-left: 2em; text-indent: -2em; list-style: none; overflow-wrap: anywhere; }
 .refs { padding-left: 0; font-size: 0.95rem; }
 
 footer { margin-top: 3em; font-size: 0.85rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 10px; }

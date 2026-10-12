@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>บทที่ 5 Convolution | เข้าใจ YOLO11-seg</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    .conv-row { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; margin: 8px 0; }
+    .conv-row .lbl { font-size: 0.85rem; color: var(--muted); margin-bottom: 3px; }
+    .cgrid { display: inline-grid; gap: 2px; }
+    .cgrid div { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+                 font: 13px Consolas, monospace; border-radius: 3px; position: relative; user-select: none; }
+    .cgrid .in { cursor: pointer; border: 1px solid #ccc; }
+    .cgrid .pad { background: #eee !important; color: #aaa !important; border: 1px dashed #bbb; }
+    .cgrid .win { outline: 3px solid #ff00ff; outline-offset: -1px; z-index: 1; }
+    .cgrid .kw { position: absolute; right: 1px; bottom: 0; font-size: 9px; color: #ff00ff; background: rgba(255,255,255,0.85); padding: 0 1px; line-height: 1.1; }
+    .cgrid .cur { outline: 3px solid #ff00ff; outline-offset: -1px; }
+    .cgrid .kern { background: #fdf6e3; border: 1px solid #d9a520; }
+    .ktab { display: inline-grid; grid-template-columns: repeat(3, 46px); gap: 2px; margin-right: 8px; }
+    .ktab input { width: 46px; font: 13px Consolas, monospace; padding: 2px; text-align: center; }
+    .ktab div { font: 11px Consolas, monospace; text-align: center; padding: 2px 0; border-radius: 3px; }
+    .tiles { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; max-width: 460px; }
+    .tiles canvas { width: 100%; image-rendering: pixelated; border: 2px solid transparent; border-radius: 3px; cursor: pointer; }
+    .tiles canvas.on { border-color: #ff00ff; }
+    .tiles span { display: block; text-align: center; font-size: 0.75rem; color: var(--muted); }
+    .pix { image-rendering: pixelated; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="topnav"><a href="../">← สารบัญ</a> · หน่วยที่ 2 CNN</p>
+  <h1>บทที่ 5 Convolution</h1>
+  <p class="muted">หน้าต่างเล็ก ๆ ที่เลื่อนไปทั่วภาพ: ชิ้นส่วนพื้นฐานที่สุดของ YOLO11</p>
+
+  <!-- ===================== 1. วัตถุประสงค์ ===================== -->
+  <div class="box info">
+    <span class="box-title">🎯 วัตถุประสงค์การเรียนรู้</span>
+    เมื่อจบบทนี้ คุณควรทำสิ่งต่อไปนี้ได้
+    <ol>
+      <li>อธิบายการเลื่อน kernel ไปบนภาพ และคำนวณผลรวมของผลคูณที่ตำแหน่งหนึ่งได้</li>
+      <li>คำนวณขนาดเอาต์พุตด้วยสูตร O = ⌊(I + 2P − K) / S⌋ + 1 ได้ และอธิบายผลของ stride กับ padding ได้</li>
+      <li>อธิบาย convolution หลายช่อง (multi-channel) และคำนวณจำนวนพารามิเตอร์ K × K × C<sub>in</sub> × C<sub>out</sub> (+ bias) ได้</li>
+      <li>อธิบายได้ว่า kernel ในโครงข่ายจริงได้มาจากการเรียนรู้ และอ่านความหมายของชั้น Conv ชั้นแรกของ YOLO11 ได้</li>
+    </ol>
+  </div>
+
+  <!-- ===================== 2. ทบทวน ===================== -->
+  <h2>ทบทวนความรู้เดิม</h2>
+  <p>
+    ในบทที่ 2 นิวรอนหนึ่งตัวคำนวณ <strong>ผลรวมของ (weight × อินพุต) + bias</strong> แล้วผ่าน activation และในบทที่ 3–4 weight เหล่านี้ถูกปรับด้วย gradient descent และ backpropagation
+    ถ้าเอานิวรอนแบบนั้นมารับภาพ 640 × 640 × 3 ตรง ๆ นิวรอน <em>ตัวเดียว</em> ต้องมี weight 1,228,800 ตัว (หนึ่งตัวต่อหนึ่งตัวเลขในภาพ, บทที่ 1)
+    และนิวรอนที่เรียนรู้ว่า "แอปเปิลอยู่มุมซ้ายบน" ก็ไม่รู้จักแอปเปิลที่อยู่มุมขวาล่าง ต้องเรียนใหม่ทุกตำแหน่ง
+    <strong>Convolution</strong> แก้ทั้งสองปัญหาด้วยความคิดง่าย ๆ คือ ใช้นิวรอนที่มองแค่ <em>หน้าต่างเล็ก ๆ</em> แล้วเลื่อนนิวรอนตัวเดิม (weight ชุดเดิม) ไปทั่วทั้งภาพ
+  </p>
+
+  <!-- ===================== 3. เนื้อหา ===================== -->
+  <h2>5.1 Kernel เลื่อนไปทีละช่อง</h2>
+  <p>
+    <strong>kernel</strong> (หรือ <strong>filter</strong>) คือตาราง weight ขนาดเล็ก เช่น 3 × 3 การทำ convolution มีขั้นตอนดังนี้
+  </p>
+  <ol>
+    <li>วาง kernel ทับบนภาพที่มุมซ้ายบน</li>
+    <li>คูณตัวเลขที่ทับกันทีละคู่ (9 คู่สำหรับ 3 × 3) แล้วบวกรวมกัน ได้ตัวเลข 1 ตัว</li>
+    <li>เขียนตัวเลขนั้นลงในตารางผลลัพธ์ แล้วเลื่อน kernel ไปทางขวา ทำซ้ำจนครบทั้งภาพ</li>
+  </ol>
+  <p>
+    ตารางผลลัพธ์เรียกว่า <strong>feature map</strong> ตัวเลขแต่ละช่องบอกว่า "ตรงตำแหน่งนี้ ภาพมีลวดลายแบบที่ kernel มองหามากแค่ไหน"
+    เพราะผลรวมของผลคูณจะใหญ่เมื่อภาพใต้หน้าต่างมีรูปแบบเหมือน kernel (ค่าบวกตรงค่าสว่าง ค่าลบตรงค่ามืด)
+  </p>
+  <pre><code>หน้าต่างภาพ        kernel (ขอบแนวตั้ง)
+0  0  9            −1  0  1
+0  0  9      ×     −1  0  1      →  0·(−1)+0·0+9·1 + 0·(−1)+0·0+9·1 + 0·(−1)+0·0+9·1 = 27
+0  0  9            −1  0  1</code></pre>
+  <p class="small muted">
+    หมายเหตุ: ในคณิตศาสตร์ convolution แท้จะกลับด้าน kernel ก่อนคูณ แต่ใน deep learning (รวมถึง <code>nn.Conv2d</code> ของ PyTorch) ไม่กลับด้าน
+    ซึ่งในทางเทคนิคเรียกว่า cross-correlation แต่ทุกคนเรียกว่า convolution และเมื่อ kernel ถูกเรียนรู้อยู่แล้ว การกลับหรือไม่กลับก็ไม่มีผลต่อความสามารถ
+  </p>
+
+  <!-- ---------- ซิม 5.1 ---------- -->
+  <div class="sim" id="s51">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 5.1 เลื่อน kernel ทีละช่อง</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "ก้าวถัดไป" แล้วดูการคูณและบวกในกล่องด้านล่าง จากนั้นเปลี่ยน stride และ padding แล้วสังเกตว่าตารางผลลัพธ์เปลี่ยนขนาดตามสูตรอย่างไร</p>
+    <div class="controls">
+      ภาพ:
+      <button data-inp="vedge">ขอบแนวตั้ง</button>
+      <button data-inp="hedge">ขอบแนวนอน</button>
+      <button data-inp="square">สี่เหลี่ยมสว่าง</button>
+      <span class="small muted">(คลิกช่องในภาพเพื่อสลับ 0 ↔ 9)</span>
+    </div>
+    <div class="controls">
+      kernel:
+      <button data-k51="vedge">ขอบแนวตั้ง</button>
+      <button data-k51="hedge">ขอบแนวนอน</button>
+      <button data-k51="blur">เบลอ</button>
+      <button data-k51="sharpen">เพิ่มความคม</button>
+      <button data-k51="ident">ไม่เปลี่ยน</button>
+    </div>
+    <div class="controls">
+      stride S: <button data-s51="1">1</button><button data-s51="2">2</button>
+      padding P: <button data-p51="0">0</button><button data-p51="1">1</button>
+    </div>
+    <div class="controls">
+      <button id="s51_step">ก้าวถัดไป</button>
+      <button id="s51_auto">▶ เล่นอัตโนมัติ</button>
+      <button id="s51_all">คำนวณทั้งหมด</button>
+    </div>
+    <div class="conv-row">
+      <div><div class="lbl" id="s51_inlbl"></div><div class="cgrid" id="s51_in"></div></div>
+      <div><div class="lbl">kernel 3 × 3</div><div class="cgrid" id="s51_k"></div></div>
+      <div><div class="lbl" id="s51_outlbl"></div><div class="cgrid" id="s51_out"></div></div>
+    </div>
+    <div class="sim-out" id="s51_txt"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s51_see">
+        <li>ภาพขอบแนวตั้ง + kernel ขอบแนวตั้ง: ผลลัพธ์เป็น 27 (แดง) ตรงคอลัมน์ที่หน้าต่างคร่อมรอยต่อมืด→สว่าง และเป็น 0 ในบริเวณที่สีเรียบ ไม่ว่าจะมืดล้วนหรือสว่างล้วน kernel นี้จึง "ตรวจจับขอบ" ไม่ได้ตรวจจับความสว่าง</li>
+        <li>ภาพเดิมแต่เปลี่ยนเป็น kernel ขอบแนวนอน: ผลลัพธ์เป็น 0 ทุกช่อง เพราะในภาพไม่มีขอบแนวนอนเลย (เมื่อ P = 0) kernel แต่ละตัวมองหาลวดลายของตัวเองเท่านั้น</li>
+        <li>ภาพสี่เหลี่ยมสว่าง + kernel ขอบแนวตั้ง: ขอบซ้ายของสี่เหลี่ยมได้ค่าบวก (แดง) ขอบขวาได้ค่าลบ (น้ำเงิน) เครื่องหมายบอกทิศของขอบ</li>
+        <li>S = 1, P = 0 ได้ 5 × 5 · S = 1, P = 1 ได้ 7 × 7 เท่าเดิม · S = 2, P = 1 ได้ 4 × 4 (เกือบครึ่ง) ตรงกับสูตรทุกกรณี</li>
+        <li>เปิด P = 1 กับภาพขอบแนวตั้ง: คอลัมน์ขวาสุดของผลลัพธ์กลายเป็นค่าลบ เพราะ kernel เห็นขอบปลอมระหว่างภาพสว่าง (9) กับขอบเติมศูนย์ (0) นี่คือผลข้างเคียงของ zero padding ที่ขอบภาพ</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>5.2 Stride, Padding และขนาดของ feature map</h2>
+  <ul>
+    <li><strong>stride (S)</strong> คือระยะที่ kernel เลื่อนแต่ละครั้ง S = 1 เลื่อนทีละช่อง S = 2 ข้ามทีละ 2 ช่อง ทำให้ feature map เล็กลงประมาณครึ่งหนึ่งในแต่ละด้าน</li>
+    <li><strong>padding (P)</strong> คือการเติมขอบรอบภาพ (ปกติเติม 0) จำนวน P ช่อง ทำให้ kernel วางคร่อมขอบภาพได้ และควบคุมไม่ให้ภาพหดลง</li>
+  </ul>
+  <pre><code>O = ⌊ (I + 2P − K) / S ⌋ + 1        I = ขนาดอินพุต, K = ขนาด kernel, ⌊ ⌋ = ปัดลง
+
+7 × 7, K = 3, S = 1, P = 0  →  (7 + 0 − 3)/1 + 1 = 5
+7 × 7, K = 3, S = 1, P = 1  →  (7 + 2 − 3)/1 + 1 = 7      (ขนาดเท่าเดิม)
+7 × 7, K = 3, S = 2, P = 1  →  ⌊(7 + 2 − 3)/2⌋ + 1 = 4
+640,   K = 3, S = 2, P = 1  →  ⌊639/2⌋ + 1 = 319 + 1 = 320   ← ชั้นแรกของ YOLO11</code></pre>
+  <p>
+    ที่มาของสูตร: หลังเติมขอบ ภาพกว้าง I + 2P ช่อง kernel กว้าง K ช่องจึงวางได้ที่ตำแหน่งแรก แล้วเหลือที่ให้เลื่อน I + 2P − K ช่อง
+    เลื่อนครั้งละ S ช่องได้ ⌊(I + 2P − K)/S⌋ ครั้ง บวกตำแหน่งแรกอีก 1
+  </p>
+  <div class="box tip">
+    <span class="box-title">💡 ใน YOLO11</span>
+    บล็อก <code>Conv</code> ของ Ultralytics (<code>nn/modules/conv.py</code>) คำนวณ padding อัตโนมัติด้วยฟังก์ชัน <code>autopad</code> ซึ่งได้ P = K // 2 (หารปัดลง)
+    kernel 3 จึงได้ P = 1 เสมอ ผลคือ Conv ที่ stride 1 รักษาขนาดภาพไว้ และ Conv ที่ stride 2 ลดขนาดลงครึ่งหนึ่งพอดี (640 → 320 → 160 → …)
+  </div>
+
+  <h2>5.3 Kernel ตัวอย่าง: ขอบ เบลอ และความคม</h2>
+  <p>
+    ก่อนยุค deep learning คนออกแบบ kernel ด้วยมือเพื่อประมวลผลภาพ ตัวอย่างที่นิยมได้แก่ kernel ตรวจขอบ (ค่าบวกด้านหนึ่ง ค่าลบอีกด้าน ผลรวมเป็น 0)
+    kernel เบลอ (เฉลี่ยเพื่อนบ้าน) และ kernel เพิ่มความคม (ขยายความต่างระหว่างจุดกลางกับเพื่อนบ้าน) ลองใช้กับภาพผลไม้ประจำวิชา
+  </p>
+
+  <!-- ---------- ซิม 5.2 ---------- -->
+  <div class="sim" id="s52">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 5.2 กรองภาพผลไม้ด้วย kernel</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองเลือก kernel ขอบแนวตั้งกับขอบแนวนอน แล้วเทียบว่าขอบส่วนไหนของตะกร้าเด่นขึ้น จากนั้นลองแก้ตัวเลขใน kernel เองแล้วดูผล</p>
+    <div class="controls">
+      kernel:
+      <button data-k52="vedge">ขอบแนวตั้ง</button>
+      <button data-k52="hedge">ขอบแนวนอน</button>
+      <button data-k52="blur">เบลอ</button>
+      <button data-k52="sharpen">เพิ่มความคม</button>
+      <button data-k52="ident">ไม่เปลี่ยน</button>
+    </div>
+    <div class="controls">
+      <div class="ktab" id="s52_k"></div>
+      <span>
+        stride: <button data-s52="1">1</button><button data-s52="2">2</button> ·
+        padding: <button data-p52="0">0</button><button data-p52="1">1</button>
+      </span>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col" style="flex-basis:240px">
+        <p class="small" style="margin:0" id="s52_inlbl"></p>
+        <canvas id="s52_in" width="256" height="256" style="width:100%;max-width:300px"></canvas>
+      </div>
+      <div class="sim-col" style="flex-basis:240px">
+        <p class="small" style="margin:0" id="s52_outlbl"></p>
+        <canvas id="s52_out" width="256" height="256" class="pix" style="width:100%;max-width:300px"></canvas>
+      </div>
+    </div>
+    <div class="sim-out" id="s52_txt"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s52_see">
+        <li>ขอบแนวตั้ง: ซี่ตะกร้าที่เอียงลงและขอบซ้ายขวาของผลไม้เด่น แต่ลายสานแนวนอนและขอบโต๊ะหายไปเกือบหมด · ขอบแนวนอน: กลับกัน ขอบโต๊ะ ปากตะกร้า และลายสานแนวนอนเด่นขึ้นมาแทน</li>
+        <li>สีแดงกับสีน้ำเงินบอกทิศ: แดง = มืด→สว่างเมื่อมองไปทางขวา (หรือลงล่าง) น้ำเงิน = สว่าง→มืด พื้นที่สีเรียบ เช่น ผนัง ได้ค่าใกล้ 0 (ขาว)</li>
+        <li>เบลอ: แต่ละพิกเซลกลายเป็นค่าเฉลี่ยของ 9 พิกเซลรอบตัว รายละเอียดเล็ก ๆ (ลายสาน) จางลง · เพิ่มความคม: ขอบชัดขึ้น เพราะ 5 × กลาง − เพื่อนบ้าน 4 ตัว ขยายความต่าง</li>
+        <li>เส้นตรงที่ขอบซ้าย-ขวาของผลลัพธ์ขอบแนวตั้ง (หรือขอบบน-ล่างของผลลัพธ์ขอบแนวนอน) คือขอบปลอมจาก zero padding แบบเดียวกับในซิม 5.1 ลองเปลี่ยนเป็น padding 0 แล้วเส้นนี้จะหายไป (ภาพเหลือ 254 × 254)</li>
+        <li>stride 2: ภาพผลลัพธ์เหลือ 128 × 128 (เห็นเป็นพิกเซลใหญ่ขึ้น) ข้อมูลตำแหน่งละเอียดหายไปครึ่งหนึ่งในแต่ละด้าน แต่ลวดลายหลักยังอยู่ครบ</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>5.4 Convolution หลายช่อง (multi-channel)</h2>
+  <p>
+    ภาพสีมี 3 ช่อง (R, G, B) และ feature map ในชั้นลึก ๆ มีได้หลายร้อยช่อง กฎของ convolution หลายช่องมีสองข้อ
+  </p>
+  <ol>
+    <li><strong>kernel หนึ่งตัวมีความลึกเท่ากับจำนวนช่องอินพุต</strong> เช่น อินพุต 3 ช่อง kernel 3 × 3 จึงเป็นก้อน 3 × 3 × 3 = 27 ตัวเลข
+      ที่แต่ละตำแหน่ง คูณ 27 คู่แล้วบวกรวมกันทั้งหมด (รวมทุกช่อง) ได้ตัวเลข <em>ตัวเดียว</em></li>
+    <li><strong>จำนวน kernel = จำนวนช่องเอาต์พุต</strong> kernel แต่ละตัวสร้าง feature map ของตัวเอง 1 ช่อง มี kernel 16 ตัวก็ได้ feature map 16 ช่อง</li>
+  </ol>
+  <figure>
+    <svg viewBox="0 0 640 210" role="img" aria-label="convolution หลายช่อง">
+      <g font-family="Sarabun, sans-serif" font-size="13" text-anchor="middle">
+        <!-- input -->
+        <rect x="40" y="40" width="110" height="110" fill="#f6c9c6" stroke="#d6453d"/>
+        <rect x="30" y="50" width="110" height="110" fill="#cbe8d3" stroke="#2f9e55"/>
+        <rect x="20" y="60" width="110" height="110" fill="#cdd9f3" stroke="#3b6fd6"/>
+        <rect x="20" y="60" width="33" height="33" fill="none" stroke="#ff00ff" stroke-width="2.5"/>
+        <text x="85" y="192">อินพุต 3 ช่อง (R, G, B)</text>
+        <text x="85" y="28" fill="#666">C_in = 3</text>
+        <!-- kernel -->
+        <g transform="translate(205,65)">
+          <rect x="16" y="0" width="45" height="45" fill="#f6c9c6" stroke="#d6453d"/>
+          <rect x="8" y="8" width="45" height="45" fill="#cbe8d3" stroke="#2f9e55"/>
+          <rect x="0" y="16" width="45" height="45" fill="#cdd9f3" stroke="#3b6fd6"/>
+        </g>
+        <text x="235" y="150">kernel 1 ตัว</text>
+        <text x="235" y="167">ลึก 3 = 3 × 3 × 3</text>
+        <text x="235" y="50" fill="#666">27 weight + 1 bias</text>
+        <text x="170" y="105" font-size="20">×</text>
+        <!-- arrow -->
+        <line x1="290" y1="100" x2="345" y2="100" stroke="#888" stroke-width="2"/>
+        <path d="M345,94 L356,100 L345,106 z" fill="#888"/>
+        <text x="322" y="88" font-size="11" fill="#666">บวกรวม</text>
+        <text x="322" y="122" font-size="11" fill="#666">27 คู่</text>
+        <!-- 1 output -->
+        <rect x="365" y="60" width="90" height="90" fill="#fdf6e3" stroke="#d9a520"/>
+        <rect x="365" y="60" width="18" height="18" fill="#d9a520"/>
+        <text x="410" y="170">feature map 1 ช่อง</text>
+        <!-- many -->
+        <text x="525" y="35" fill="#666">kernel 16 ตัว →</text>
+        <g>
+          <rect x="530" y="45" width="80" height="80" fill="#fdf6e3" stroke="#d9a520"/>
+          <rect x="524" y="51" width="80" height="80" fill="#fdf6e3" stroke="#d9a520"/>
+          <rect x="518" y="57" width="80" height="80" fill="#fdf6e3" stroke="#d9a520"/>
+          <rect x="512" y="63" width="80" height="80" fill="#fdf6e3" stroke="#d9a520"/>
+          <rect x="506" y="69" width="80" height="80" fill="#fdf6e3" stroke="#d9a520"/>
+        </g>
+        <text x="555" y="170">เอาต์พุต 16 ช่อง</text>
+        <text x="555" y="187" fill="#666">C_out = 16</text>
+      </g>
+    </svg>
+    <figcaption>รูปที่ 5.1 kernel หนึ่งตัวลึกเท่าจำนวนช่องอินพุตและให้ผลลัพธ์ 1 ช่อง จำนวน kernel จึงกำหนดจำนวนช่องเอาต์พุต</figcaption>
+  </figure>
+  <pre><code>จำนวนพารามิเตอร์ = K × K × C_in × C_out  (+ C_out ถ้ามี bias)
+ตัวอย่าง: K = 3, C_in = 3, C_out = 16  →  3 × 3 × 3 × 16 = 432  (+ 16 bias = 448)</code></pre>
+  <p>
+    สังเกตว่าจำนวนพารามิเตอร์ <em>ไม่ขึ้นกับขนาดภาพ</em> เลย เพราะ kernel ชุดเดิมถูกใช้ซ้ำทุกตำแหน่ง (เรียกว่า weight sharing)
+    ภาพ 640 × 640 หรือ 1280 × 1280 ก็ใช้ 432 ตัวเท่าเดิม ต่างกันแค่จำนวนครั้งที่คำนวณ
+  </p>
+
+  <!-- ---------- ซิม 5.3 ---------- -->
+  <div class="sim" id="s53">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 5.3 Convolution หลายช่องแบบ 3 มิติ</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "▶ เล่น" แล้วดูว่า kernel ก้อนเดียวคลุมอินพุต <em>ทุกช่อง</em> พร้อมกัน แต่ให้ผลลัพธ์แค่ 1 ลูกบาศก์ จากนั้นกดตัวอย่าง "ชั้น 0" และ "ชั้น 1" ของ yolo11n-seg แล้วดูว่าก้อน kernel ตรงกลางโตขึ้นแค่ไหน</p>
+    <div class="controls">
+      ตัวอย่าง: <span id="s53_pre"></span>
+    </div>
+    <div class="controls">
+      <label>ขนาดภาพ I <input type="number" id="s53_i" min="3" max="12" style="width:52px"></label>
+      <label>C<sub>in</sub> <input type="number" id="s53_ci" min="1" max="16" style="width:52px"></label>
+      <label>C<sub>out</sub> <input type="number" id="s53_co" min="1" max="16" style="width:52px"></label>
+      <label>K <select id="s53_k"><option>1</option><option>3</option><option>5</option></select></label>
+      <label>S <select id="s53_s"><option>1</option><option>2</option></select></label>
+      <label>P <select id="s53_p"><option>0</option><option>1</option><option>2</option></select></label>
+      <label><input type="checkbox" id="s53_b"> มี bias</label>
+    </div>
+    <div class="controls">
+      <button id="s53_step">ก้าวถัดไป</button>
+      <button id="s53_play">▶ เล่น</button>
+      <button id="s53_all">เติมผลลัพธ์ทั้งหมด</button>
+      <span class="small muted">มุมมอง:</span>
+      <button data-view3d="iso">เฉียง</button><button data-view3d="front">หน้าตรง</button><button data-view3d="top">มองจากบน</button>
+      <button data-zoom3d="in">＋</button><button data-zoom3d="out">－</button>
+    </div>
+    <div id="s53_3d" style="width:100%;height:400px;border:1px solid var(--line);border-radius:6px"></div>
+    <p class="small muted" style="margin:2px 0 6px">ลากบนภาพเพื่อหมุน · 1 ลูกบาศก์ = ตัวเลข 1 ตัว · กรอบชมพู = ตำแหน่งที่ kernel กำลังคำนวณ</p>
+    <div class="sim-out" id="s53_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s53_see">
+        <li>กรอบชมพูบนอินพุตลึกทะลุ <em>ทุกช่อง</em> เสมอ (ความลึกของ kernel = C<sub>in</sub>) แต่ผลลัพธ์ของแต่ละตำแหน่งมีแค่ 1 ลูกบาศก์ในช่องที่มีสีเดียวกับ kernel ตัวนั้น</li>
+        <li>kernel แต่ละตัวเติมช่องเอาต์พุตของตัวเองหนึ่งแผ่น kernel 2 ตัวได้เอาต์พุต 2 แผ่น: จำนวน kernel = C<sub>out</sub></li>
+        <li>นับลูกบาศก์ในกลุ่ม kernel ตรงกลางได้เท่ากับจำนวน weight พอดี (เริ่มต้น: 2 ก้อน × 3 × 3 × 3 = 54) ลองเปลี่ยนขนาดภาพ I แล้วดูว่ากลุ่มตรงกลางไม่เปลี่ยนเลย มีแต่อินพุตและเอาต์พุตที่เปลี่ยน</li>
+        <li>ชั้น 0 ของ yolo11n-seg: kernel 16 ก้อน ก้อนละ 3 × 3 × 3 = 432 weight · ชั้น 1: kernel 32 ก้อน แต่ละก้อนลึก 16 = 4,608 weight กลุ่มตรงกลางโตตาม C<sub>in</sub> × C<sub>out</sub> ไม่ใช่ตามขนาดภาพ</li>
+        <li>Conv ของ YOLO11 ไม่มี bias (<code>bias=False</code>) เพราะชั้นถัดไปคือ BatchNorm ซึ่งมีค่าเลื่อน (β) ของตัวเองอยู่แล้ว (BatchNorm จะเรียนในบทที่ 6)</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>5.5 Kernel ในโครงข่ายจริง "เรียนรู้" เอง</h2>
+  <p>
+    ใน CNN ไม่มีใครออกแบบ kernel ด้วยมือ ตัวเลขทุกตัวใน kernel คือ weight ธรรมดาที่เริ่มจากค่าสุ่ม แล้วถูกปรับด้วย gradient descent และ backpropagation (บทที่ 3–4)
+    ให้ loss ลดลง kernel ที่ได้จึงเป็นลวดลายใดก็ได้ที่ "ช่วยงานตรวจจับ" มากที่สุด ซึ่งบางตัวคล้าย kernel ตรวจขอบที่คนออกแบบ บางตัวตอบสนองต่อสีเฉพาะ
+    ซิมด้านล่างใช้ kernel <strong>จริงทั้ง 16 ตัว</strong> ของชั้นแรกใน <code>yolo11n-seg.pt</code> (ดึงด้วย <code>tools/ch5_first_layer.py</code>)
+    กับภาพผลไม้ที่ผ่าน letterbox เป็น 640 × 640 แล้ว (บทที่ 1) คำนวณแบบเดียวกับโมเดลทุกขั้น: conv (stride 2, padding 1) → BatchNorm → SiLU
+  </p>
+
+  <!-- ---------- ซิม 5.4 ---------- -->
+  <div class="sim" id="s54">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 5.4 ชั้นแรกของ yolo11n-seg มองเห็นอะไร</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองคลิก kernel ทีละตัวแล้วดู feature map ที่ได้ หาตัวที่ตอบสนองต่อขอบแนวตั้ง ขอบแนวนอน และตัวที่ตอบสนองต่อสีของผลไม้</p>
+    <p class="small" style="margin:0 0 4px"><strong>kernel 16 ตัว</strong> (แต่ละตัวคือ 3 × 3 × 3 แสดงเป็นภาพสี: ช่อง R, G, B ของ weight → สีแดง เขียว น้ำเงิน, เทา = 0)</p>
+    <div class="tiles" id="s54_tiles"></div>
+    <div class="sim-row" style="margin-top:10px">
+      <div class="sim-col" style="flex-basis:260px">
+        <p class="small" style="margin:0">อินพุต (1, 3, 640, 640)</p>
+        <canvas id="s54_in" width="320" height="320" style="width:100%;max-width:320px"></canvas>
+      </div>
+      <div class="sim-col" style="flex-basis:260px">
+        <p class="small" style="margin:0" id="s54_maplbl"></p>
+        <canvas id="s54_map" width="320" height="320" class="pix" style="width:100%;max-width:320px;cursor:crosshair"></canvas>
+      </div>
+    </div>
+    <div class="sim-out" id="s54_out">กำลังโหลด data/ch5_first_layer.json …</div>
+    <p class="small" style="margin:10px 0 2px"><strong>feature map ทั้ง 16 ช่อง</strong> = เอาต์พุต (1, 16, 320, 320) ของชั้นที่ 0 (คลิกเพื่อเลือก)</p>
+    <canvas id="s54_all" width="640" height="204" style="width:100%;cursor:pointer"></canvas>
+    <p class="small" style="margin:12px 0 2px"><strong>มุมมอง 3 มิติ</strong>: อินพุต 3 แผ่น (R, G, B) → เอาต์พุต 16 แผ่นซ้อนกันเป็นก้อน (1, 16, 320, 320) · ลากเพื่อหมุน คลิกแผ่นเพื่อเลือกช่อง</p>
+    <div class="controls">
+      <label>ระยะห่างระหว่างแผ่น <input type="range" id="s54_gap" min="0.05" max="1.5" step="0.05" value="0.6"></label>
+      <button data-view3d="iso">เฉียง</button><button data-view3d="front">หน้าตรง</button><button data-view3d="top">มองจากบน</button>
+      <button data-zoom3d="in">＋</button><button data-zoom3d="out">－</button>
+    </div>
+    <div id="s54_3d" style="width:100%;height:400px;border:1px solid var(--line);border-radius:6px"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s54_see">
+        <li><strong>ตัวตรวจขอบที่เรียนรู้เอง</strong>: kernel 6 เมื่อรวม 3 ช่องสีเข้าด้วยกันได้ประมาณ [[−0.36, −0.12, 0.51], [−1.01, −0.13, 1.11], [−0.46, −0.11, 0.58]] หน้าตาเกือบเหมือน kernel ขอบแนวตั้งในซิม 5.1 (ลบทางซ้าย บวกทางขวา) ทั้งที่ไม่มีใครออกแบบให้ ส่วน kernel 3 คือแบบเดียวกันแต่กลับเครื่องหมาย (ขอบสว่าง→มืด)</li>
+        <li>kernel 7 และ 8 คือตัวตรวจขอบแนวนอนสองทิศ ดูช่อง 8: เส้นแนวนอนสว่างที่ขอบบนของภาพ ตรงรอยต่อระหว่างขอบเทา 114 ของ letterbox กับผนัง (ค่าเฉลี่ยแถวนั้น 19.6 เทียบกับราว 1.3 ในบริเวณอื่น) โมเดลจึง "เห็น" ขอบ letterbox ด้วย</li>
+        <li><strong>ตัวตรวจสี</strong>: kernel 12 (เขียว: G บวก R และ B ลบ) ให้ค่าเฉลี่ยบนแอปเปิลเขียว 17.9 กล้วย 8.6 แต่บนองุ่นและแอปเปิลแดงเกือบ 0 · kernel 15 (แดง) สูงบนแอปเปิลแดง 15.1 ส้ม 13.3 กล้วย 12.8 แต่บนองุ่นแค่ 1.1 · kernel 5 (G ลบมาก) สูงบนองุ่น 14.9 และแอปเปิลแดงลูกหน้า 10.2 kernel กลุ่มนี้ไม่สนลวดลาย แต่เปรียบเทียบช่องสีกัน</li>
+        <li>บางช่องแทบไม่ทำงานกับภาพนี้ เช่น ช่อง 13 มีค่าเกือบ 0 ทั้งภาพ (ภาพในช่องนี้จึงดูเป็นจุดรบกวน) ช่องเหล่านี้อาจมีประโยชน์กับภาพแบบอื่นใน COCO</li>
+        <li>ทั้งหมดนี้คือ "สายตาชั้นแรก" ของ YOLO11 ซึ่งแค่หาขอบ จุด และสี ส่วนการรวมเป็นรูปทรงและวัตถุเกิดในชั้นถัด ๆ ไป (บทที่ 6)</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ===================== 5. อยู่ตรงไหน ===================== -->
+  <h2>🔗 อยู่ตรงไหนใน YOLO11-seg</h2>
+  <div id="pipe"></div>
+  <p>
+    บรรทัดแรกของ Backbone ในไฟล์ <code>yolo11-seg.yaml</code> คือ <code>[-1, 1, Conv, [64, 3, 2]]  # 0-P1/2</code>
+    หมายถึง Conv ที่มี kernel 3 × 3 stride 2 จำนวน 64 ช่อง ซึ่งรุ่น n คูณจำนวนช่องด้วย 0.25 จึงเหลือ <strong>16 ช่อง</strong> พอดีกับซิม 5.4
+    ภาพ 640 × 640 จึงกลายเป็น feature map ขนาด 320 × 320 × 16 ตามสูตร ⌊(640 + 2 − 3)/2⌋ + 1 = 320 ป้าย P1/2 แปลว่า "ระดับที่ 1 ขนาด 1/2 ของภาพ"
+  </p>
+  <div class="table-wrap">
+  <table id="pipe_tab">
+    <tr><th>ชั้นที่</th><th>บรรทัดใน yaml</th><th>K, S, P</th><th>C<sub>in</sub> → C<sub>out</sub></th><th>shape เอาต์พุต</th><th>weight ของ conv</th></tr>
+  </table>
+  </div>
+  <p>
+    Conv แบบ stride 2 ห้าครั้งใน Backbone ทำให้ภาพเล็กลงทีละครึ่ง 640 → 320 → 160 → 80 → 40 → 20 ขณะที่จำนวนช่องเพิ่มขึ้นเรื่อย ๆ
+    ซึ่งจะเป็นเรื่องหลักของบทที่ 6 ส่วน Conv แทบทุกตัวในโมเดล (รวม 90 บล็อกใน yolo11n-seg) ทำงานแบบเดียวกับในบทนี้ทุกประการ ต่างกันแค่จำนวนช่องและขนาด kernel
+  </p>
+
+  <!-- ===================== 6. สรุป ===================== -->
+  <h2>สรุปท้ายบท</h2>
+  <ul>
+    <li>Convolution คือการเลื่อน kernel ขนาดเล็กไปทั่วภาพ แต่ละตำแหน่งคูณกันทีละคู่แล้วบวกรวม ได้ feature map ที่บอกว่าลวดลายแบบ kernel อยู่ตรงไหน</li>
+    <li>ขนาดเอาต์พุต O = ⌊(I + 2P − K)/S⌋ + 1 · stride 2 ลดขนาดลงราวครึ่งหนึ่ง · padding ช่วยรักษาขนาดและให้ kernel คร่อมขอบภาพได้</li>
+    <li>kernel หนึ่งตัวลึกเท่าจำนวนช่องอินพุตและให้ผลลัพธ์ 1 ช่อง จำนวน kernel = จำนวนช่องเอาต์พุต</li>
+    <li>จำนวนพารามิเตอร์ = K × K × C<sub>in</sub> × C<sub>out</sub> (+ C<sub>out</sub> ถ้ามี bias) ไม่ขึ้นกับขนาดภาพ เพราะใช้ kernel ชุดเดียวทุกตำแหน่ง</li>
+    <li>kernel ในโครงข่ายจริงเรียนรู้จาก gradient descent ไม่ได้ออกแบบด้วยมือ</li>
+    <li>ชั้นแรกของ YOLO11 คือ Conv K = 3, S = 2, P = 1 (autopad) ไม่มี bias ตามด้วย BatchNorm และ SiLU: (1, 3, 640, 640) → (1, 16, 320, 320) ใช้ weight 432 ตัวในรุ่น n</li>
+  </ul>
+
+  <!-- ===================== 7. แบบทดสอบ ===================== -->
+  <h2>แบบทดสอบท้ายบท</h2>
+  <p class="small muted">กดเลือกคำตอบเพื่อดูเฉลยและคำอธิบายทันที</p>
+  <div id="quiz"></div>
+
+  <!-- ===================== 8. อ้างอิง ===================== -->
+  <h2>เอกสารอ้างอิง</h2>
+  <ul class="refs">
+    <li>Dumoulin, V., &amp; Visin, F. (2016). <em>A guide to convolution arithmetic for deep learning</em> (arXiv:1603.07285). arXiv. https://doi.org/10.48550/arXiv.1603.07285</li>
+    <li>Goodfellow, I., Bengio, Y., &amp; Courville, A. (2016). <em>Deep learning</em>. MIT Press. https://www.deeplearningbook.org</li>
+    <li>Jocher, G., &amp; Qiu, J. (2024). <em>Ultralytics YOLO11</em> [Computer software]. Ultralytics. https://github.com/ultralytics/ultralytics</li>
+    <li>LeCun, Y., Bottou, L., Bengio, Y., &amp; Haffner, P. (1998). Gradient-based learning applied to document recognition. <em>Proceedings of the IEEE, 86</em>(11), 2278–2324. https://doi.org/10.1109/5.726791</li>
+    <li>Stanford University. (n.d.). <em>CS231n: Deep learning for computer vision</em> [Course notes]. https://cs231n.github.io</li>
+  </ul>
+
+  <footer>
+    ข้อเท็จจริงของ YOLO11 ในบทนี้ตรวจกับ <strong>ultralytics 8.4.2</strong>: อ่าน source <code>cfg/models/11/yolo11-seg.yaml</code>, <code>nn/modules/conv.py</code> (Conv, autopad)
+    และรัน <code>tools/ch5_first_layer.py</code> → <code>data/ch5_first_layer.json</code> (weight, BatchNorm และ shape จริงจาก yolo11n-seg.pt พร้อมเทียบผลชั้นแรกกับ PyTorch)
+    · <a href="../chapter4/">← บทที่ 4</a> · <a href="../">สารบัญ</a> · <a href="../chapter6/">บทที่ 6 จาก Convolution สู่ CNN ทั้งเครือข่าย →</a>
+  </footer>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="../assets/common.js"></script>
+<script src="../assets/tensor3d.js"></script>
+<script>
+const f2 = (v, n = 2) => (Math.abs(v) < 5e-10 ? 0 : v).toFixed(n);
+const $ = id => document.getElementById(id);
+const fmtInt = v => Math.round(v).toLocaleString('en-US');
+const DATA5 = fetch('../data/ch5_first_layer.json').then(r => r.json());
+
+const KERNELS = {
+  vedge:   { name: 'ขอบแนวตั้ง', k: [[-1, 0, 1], [-1, 0, 1], [-1, 0, 1]] },
+  hedge:   { name: 'ขอบแนวนอน', k: [[-1, -1, -1], [0, 0, 0], [1, 1, 1]] },
+  blur:    { name: 'เบลอ', k: [[1, 1, 1], [1, 1, 1], [1, 1, 1]].map(r => r.map(v => v / 9)) },
+  sharpen: { name: 'เพิ่มความคม', k: [[0, -1, 0], [-1, 5, -1], [0, -1, 0]] },
+  ident:   { name: 'ไม่เปลี่ยน', k: [[0, 0, 0], [0, 1, 0], [0, 0, 0]] },
+};
+const kText = v => (Math.abs(v - 1 / 9) < 1e-9 ? '1/9' : String(+v.toFixed(3)));
+// สีของค่าที่มีเครื่องหมาย: บวก = แดง, ลบ = น้ำเงิน, 0 = ขาว
+const signedColor = (v, m) => {
+  const t = Math.min(1, Math.abs(v) / (m || 1));
+  return v >= 0 ? `rgb(255,${Math.round(255 - 180 * t)},${Math.round(255 - 190 * t)})` : `rgb(${Math.round(255 - 190 * t)},${Math.round(255 - 140 * t)},255)`;
+};
+
+/* =========================================================
+   ซิม 5.1 เลื่อน kernel ทีละช่อง
+   ========================================================= */
+(function () {
+  const root = $('s51'), N = 7;
+  const INPUTS = {
+    vedge: () => Array.from({ length: N }, () => [0, 0, 0, 9, 9, 9, 9]),
+    hedge: () => Array.from({ length: N }, (_, r) => new Array(N).fill(r < 3 ? 0 : 9)),
+    square: () => Array.from({ length: N }, (_, r) => Array.from({ length: N }, (_, c) => (r >= 2 && r <= 4 && c >= 2 && c <= 4 ? 9 : 0))),
+  };
+  let st, timer = null;
+  const O = () => Math.floor((N + 2 * st.P - 3) / st.S) + 1;
+  const px = (r, c) => { const rr = r - st.P, cc = c - st.P; return rr >= 0 && rr < N && cc >= 0 && cc < N ? st.img[rr][cc] : 0; };
+  function cell(i) {
+    const o = O(), r0 = Math.floor(i / o) * st.S, c0 = (i % o) * st.S, K = KERNELS[st.k].k;
+    let sum = 0; const terms = [];
+    for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) { const v = px(r0 + a, c0 + b); sum += v * K[a][b]; terms.push(`${v}·${kText(K[a][b]).replace(/^-/, '(−') + (K[a][b] < 0 ? ')' : '')}`); }
+    return { r0, c0, sum, terms };
+  }
+  function draw() {
+    const o = O(), NP = N + 2 * st.P, K = KERNELS[st.k].k;
+    const cur = st.done > 0 ? cell(st.done - 1) : null;
+    let h = '';
+    for (let r = 0; r < NP; r++) for (let c = 0; c < NP; c++) {
+      const isPad = r < st.P || c < st.P || r >= N + st.P || c >= N + st.P, v = px(r, c);
+      const inWin = cur && r >= cur.r0 && r < cur.r0 + 3 && c >= cur.c0 && c < cur.c0 + 3;
+      const g = 40 + v * 24;
+      h += `<div class="${isPad ? 'pad' : 'in'}${inWin ? ' win' : ''}" data-rc="${r - st.P},${c - st.P}" style="background:rgb(${g},${g},${g});color:${v >= 5 ? '#000' : '#fff'}">${v}` +
+           (inWin ? `<span class="kw">×${kText(K[r - cur.r0][c - cur.c0])}</span>` : '') + '</div>';
+    }
+    const gin = $('s51_in'); gin.innerHTML = h; gin.style.gridTemplateColumns = `repeat(${NP}, 30px)`;
+    $('s51_k').innerHTML = K.flat().map(v => `<div class="kern">${kText(v)}</div>`).join(''); $('s51_k').style.gridTemplateColumns = 'repeat(3, 30px)';
+    const vals = Array.from({ length: o * o }, (_, i) => (i < st.done ? cell(i).sum : null));
+    const m = Math.max(1e-9, ...Array.from({ length: o * o }, (_, i) => Math.abs(cell(i).sum)));
+    $('s51_out').innerHTML = vals.map((v, i) => `<div class="${i === st.done - 1 ? 'cur' : ''}" style="background:${v === null ? '#f7f7f7' : signedColor(v, m)};border:1px solid #e2ded6">${v === null ? '' : +v.toFixed(2)}</div>`).join('');
+    $('s51_out').style.gridTemplateColumns = `repeat(${o}, 30px)`;
+    $('s51_inlbl').textContent = `อินพุต ${N} × ${N}` + (st.P ? ` + ขอบเติม 0 (P = ${st.P}) = ${NP} × ${NP}` : '');
+    $('s51_outlbl').textContent = `feature map ${o} × ${o}`;
+    let t = `ขนาดเอาต์พุต O = ⌊(${N} + 2·${st.P} − 3) / ${st.S}⌋ + 1 = ⌊${N + 2 * st.P - 3}/${st.S}⌋ + 1 = <b>${o}</b> → ${o} × ${o} = ${o * o} ตำแหน่ง<br>`;
+    if (cur) t += `ตำแหน่งที่ ${st.done}/${o * o} (แถว ${Math.floor((st.done - 1) / o)}, คอลัมน์ ${(st.done - 1) % o}):<br><span class="mono small">${cur.terms.join(' + ')}</span> = <b>${+cur.sum.toFixed(2)}</b>`;
+    else t += 'กด "ก้าวถัดไป" เพื่อวาง kernel ที่มุมซ้ายบน';
+    if (st.done === o * o) t += '<br>✅ ครบทุกตำแหน่งแล้ว';
+    $('s51_txt').innerHTML = t;
+    root.querySelectorAll('[data-inp]').forEach(b => b.classList.toggle('on', b.dataset.inp === st.inp));
+    root.querySelectorAll('[data-k51]').forEach(b => b.classList.toggle('on', b.dataset.k51 === st.k));
+    root.querySelectorAll('[data-s51]').forEach(b => b.classList.toggle('on', +b.dataset.s51 === st.S));
+    root.querySelectorAll('[data-p51]').forEach(b => b.classList.toggle('on', +b.dataset.p51 === st.P));
+    $('s51_auto').textContent = timer ? '⏸ หยุด' : '▶ เล่นอัตโนมัติ';
+  }
+  function stop() { if (timer) { clearInterval(timer); timer = null; } }
+  const restart = () => { stop(); st.done = 0; draw(); };
+  $('s51_step').addEventListener('click', () => { const o = O(); st.done = st.done >= o * o ? 1 : st.done + 1; draw(); });
+  $('s51_all').addEventListener('click', () => { stop(); st.done = O() * O(); draw(); });
+  $('s51_auto').addEventListener('click', () => {
+    if (timer) { stop(); draw(); return; }
+    if (st.done >= O() * O()) st.done = 0;
+    timer = setInterval(() => { st.done++; if (st.done >= O() * O()) stop(); draw(); }, 450); draw();
+  });
+  $('s51_in').addEventListener('click', e => {
+    const d = e.target.closest('.in'); if (!d) return;
+    const [r, c] = d.dataset.rc.split(',').map(Number); st.img[r][c] = st.img[r][c] ? 0 : 9; st.inp = ''; draw();
+  });
+  root.querySelectorAll('[data-inp]').forEach(b => b.addEventListener('click', () => { st.inp = b.dataset.inp; st.img = INPUTS[st.inp](); restart(); }));
+  root.querySelectorAll('[data-k51]').forEach(b => b.addEventListener('click', () => { st.k = b.dataset.k51; draw(); }));
+  root.querySelectorAll('[data-s51]').forEach(b => b.addEventListener('click', () => { st.S = +b.dataset.s51; restart(); }));
+  root.querySelectorAll('[data-p51]').forEach(b => b.addEventListener('click', () => { st.P = +b.dataset.p51; restart(); }));
+  const reset = () => { stop(); st = { inp: 'vedge', img: INPUTS.vedge(), k: 'vedge', S: 1, P: 0, done: 0 }; draw(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 5.2 กรองภาพผลไม้
+   ========================================================= */
+(function () {
+  const root = $('s52'), N = 256;
+  const src = makeFruitImage(N, N).getContext('2d').getImageData(0, 0, N, N).data;
+  const gray = new Float32Array(N * N);
+  for (let i = 0; i < N * N; i++) gray[i] = 0.299 * src[i * 4] + 0.587 * src[i * 4 + 1] + 0.114 * src[i * 4 + 2];
+  // วาดภาพขาวดำต้นฉบับ
+  (function () {
+    const { ctx } = setupCanvas($('s52_in')), im = ctx.createImageData(N, N);
+    for (let i = 0; i < N * N; i++) { im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = gray[i]; im.data[i * 4 + 3] = 255; }
+    const c = document.createElement('canvas'); c.width = N; c.height = N; c.getContext('2d').putImageData(im, 0, 0);
+    ctx.drawImage(c, 0, 0, N, N);
+  })();
+  $('s52_inlbl').textContent = `อินพุต (ขาวดำ) ${N} × ${N}`;
+  let st;
+  const kbox = $('s52_k');
+  kbox.innerHTML = Array.from({ length: 9 }, (_, i) => `<input type="number" step="0.1" data-i="${i}">`).join('');
+  function readK() { return [0, 1, 2].map(r => [0, 1, 2].map(c => +kbox.children[r * 3 + c].value || 0)); }
+  function writeK(K) { K.flat().forEach((v, i) => { kbox.children[i].value = +v.toFixed(4); }); }
+  function draw() {
+    const K = readK(), { S, P } = st, O = Math.floor((N + 2 * P - 3) / S) + 1;
+    const out = new Float32Array(O * O);
+    let mn = Infinity, mx = -Infinity;
+    for (let oy = 0; oy < O; oy++) for (let ox = 0; ox < O; ox++) {
+      let s = 0;
+      for (let a = 0; a < 3; a++) { const y = oy * S + a - P; if (y < 0 || y >= N) continue;
+        for (let b = 0; b < 3; b++) { const x = ox * S + b - P; if (x < 0 || x >= N) continue; s += gray[y * N + x] * K[a][b]; } }
+      out[oy * O + ox] = s; if (s < mn) mn = s; if (s > mx) mx = s;
+    }
+    const ksum = K.flat().reduce((a, b) => a + b, 0), signed = Math.abs(ksum) < 1e-6;
+    const m = Math.max(Math.abs(mn), Math.abs(mx)) * 0.6;
+    const c = document.createElement('canvas'); c.width = O; c.height = O;
+    const cx = c.getContext('2d'), im = cx.createImageData(O, O);
+    for (let i = 0; i < O * O; i++) {
+      const v = out[i];
+      let r, g, b;
+      if (signed) { const t = Math.min(1, Math.abs(v) / (m || 1)); [r, g, b] = v >= 0 ? [255, 255 - 180 * t, 255 - 190 * t] : [255 - 190 * t, 255 - 140 * t, 255]; }
+      else { r = g = b = Math.max(0, Math.min(255, v)); }
+      im.data.set([r, g, b, 255], i * 4);
+    }
+    cx.putImageData(im, 0, 0);
+    const { ctx } = setupCanvas($('s52_out'));
+    ctx.imageSmoothingEnabled = false; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, N, N); ctx.drawImage(c, 0, 0, N, N);
+    $('s52_outlbl').textContent = `feature map ${O} × ${O}` + (O !== N ? ' (ขยายให้เต็มกรอบเพื่อเทียบ)' : '');
+    $('s52_txt').innerHTML =
+      `O = ⌊(${N} + 2·${P} − 3)/${S}⌋ + 1 = <b>${O}</b> · ค่าในผลลัพธ์ต่ำสุด ${mn.toFixed(1)} สูงสุด ${mx.toFixed(1)} · ผลรวมของ kernel = ${+ksum.toFixed(3)}<br>` +
+      (signed ? 'ผลรวมของ kernel เป็น 0 จึงแสดงแบบมีเครื่องหมาย: <span style="color:#d6453d">แดง = บวก</span>, <span style="color:#3b6fd6">น้ำเงิน = ลบ</span>, ขาว = ใกล้ 0'
+              : 'แสดงเป็นภาพขาวดำ (ตัดค่าที่ต่ำกว่า 0 และเกิน 255)');
+    root.querySelectorAll('[data-k52]').forEach(b => b.classList.toggle('on', b.dataset.k52 === st.k));
+    root.querySelectorAll('[data-s52]').forEach(b => b.classList.toggle('on', +b.dataset.s52 === S));
+    root.querySelectorAll('[data-p52]').forEach(b => b.classList.toggle('on', +b.dataset.p52 === P));
+  }
+  kbox.addEventListener('input', () => { st.k = ''; draw(); });
+  root.querySelectorAll('[data-k52]').forEach(b => b.addEventListener('click', () => { st.k = b.dataset.k52; writeK(KERNELS[st.k].k); draw(); }));
+  root.querySelectorAll('[data-s52]').forEach(b => b.addEventListener('click', () => { st.S = +b.dataset.s52; draw(); }));
+  root.querySelectorAll('[data-p52]').forEach(b => b.addEventListener('click', () => { st.P = +b.dataset.p52; draw(); }));
+  const reset = () => { st = { k: 'vedge', S: 1, P: 1 }; writeK(KERNELS.vedge.k); draw(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 5.3 convolution หลายช่องแบบ 3 มิติ (Scene3D ใน assets/tensor3d.js)
+   แกน x = คอลัมน์, y = แถว (ลงล่างเป็นลบ), z = ช่อง (ถอยหลังเป็นลบ)
+   ========================================================= */
+(function () {
+  const root = $('s53'), S3 = new Scene3D($('s53_3d'));
+  S3.bindButtons(root);
+  let presets = [
+    { label: 'เริ่มต้น (3 → 2)', I: 6, ci: 3, co: 2, k: 3, s: 1, p: 0 },
+    { label: 'ภาพสี → 4 ช่อง, P = 1', I: 6, ci: 3, co: 4, k: 3, s: 1, p: 1 },
+  ];
+  let cfg, done = 0, timer = null, M = {};
+  const geo = c => {
+    const Ip = c.I + 2 * c.P, O = Math.floor((c.I + 2 * c.P - c.K) / c.S) + 1;
+    const cols = Math.ceil(Math.sqrt(c.co)), rows = Math.ceil(c.co / cols), kw = cols * (c.K + 1) - 1, kh = rows * (c.K + 1) - 1;
+    const kx0 = Ip + 3, ox0 = kx0 + kw + 3;
+    return { Ip, O, cols, rows, kw, kh, kx0, ox0, yK: -(Ip - kh) / 2, yOut: -(Ip - O) / 2 };
+  };
+  const kColor = j => `hsl(${(j * 137.5 + 20) % 360}, 70%, 52%)`;
+  const inColor = ch => (cfg.ci === 3 ? ['#f2a29c', '#97d4a8', '#a3bbf0'][ch] : `hsl(215, 45%, ${ch % 2 ? 72 : 82}%)`);
+  const curStep = () => { const O = geo(cfg).O; if (!done) return null; const t = done - 1, q = t % (O * O); return { j: Math.floor(t / (O * O)), r: Math.floor(q / O), c: q % O }; };
+
+  function text() {
+    const c = cfg, O = geo(c).O;
+    if (O < 1) { $('s53_out').innerHTML = '⚠ kernel ใหญ่กว่าภาพ (รวม padding) ลองเพิ่ม I หรือ P'; return; }
+    const w = c.K * c.K * c.ci * c.co, per = c.K * c.K * c.ci, total = c.co * O * O;
+    let t = `<b>อินพุต (ซ้าย)</b>: C<sub>in</sub> × I × I = ${c.ci} × ${c.I} × ${c.I} = ${fmtInt(c.ci * c.I * c.I)} ลูกบาศก์` + (c.P ? ` (+ ขอบเติม 0 สีเทาจาง P = ${c.P})` : '') + '<br>' +
+      `<b>kernel (กลาง)</b>: ${c.co} ก้อน × ก้อนละ ${c.K} × ${c.K} × ${c.ci} = ${per} → รวม <b>${fmtInt(w)}</b> ลูกบาศก์ = จำนวน weight` + (c.bias ? ` + bias ${c.co} ตัว (ลูกกลม) = <b>${fmtInt(w + c.co)}</b>` : '') + '<br>' +
+      `<b>เอาต์พุต (ขวา)</b>: C<sub>out</sub> × O × O = ${c.co} × ${O} × ${O} โดย O = ⌊(${c.I} + 2·${c.P} − ${c.K})/${c.S}⌋ + 1 = ${O}<br>`;
+    const cur = curStep();
+    if (cur) t += `<span style="color:#c0007a">▸ kernel ตัวที่ ${cur.j + 1} วางที่แถว ${cur.r} คอลัมน์ ${cur.c}: คูณ ${c.K}×${c.K}×${c.ci} = ${per} คู่ แล้วบวกรวม${c.bias ? ' + bias' : ''} → ได้ 1 ค่า ใส่ช่องเอาต์พุตที่ ${cur.j + 1}</span> · คำนวณแล้ว ${done}/${total} ค่า`;
+    else t += `กด "ก้าวถัดไป" หรือ "▶ เล่น" · ต้องคำนวณทั้งหมด ${c.co} × ${O} × ${O} = ${total} ค่า แต่ละค่าใช้การคูณ ${per} ครั้ง`;
+    if (c.real) {
+      const r = c.real, dense = r.I * r.I * c.ci * r.O * r.O * c.co;
+      t += `<br><span class="muted">ของจริง: (1, ${c.ci}, ${r.I}, ${r.I}) → (1, ${c.co}, ${r.O}, ${r.O}) ในภาพย่อความกว้าง-ยาวเหลือ ${c.I} → ${O} เพื่อให้วาดได้ ส่วนจำนวนช่องและ kernel เท่าของจริงทุกอย่าง · ` +
+           `จำนวนการคูณของจริง = ${r.O}² × ${per} × ${c.co} = ${fmtInt(r.O * r.O * per * c.co)} · ถ้าใช้นิวรอนต่อกับทุกตัวเลขของภาพจะต้องใช้ weight ${dense.toExponential(2)} ตัว แทนที่จะเป็น ${fmtInt(w)}</span>`;
+    }
+    $('s53_out').innerHTML = t;
+  }
+
+  function build() {
+    if (!S3.ok) return;
+    S3.clear(); M = {};
+    const c = cfg, g = geo(c), T = S3.T;
+    if (g.O < 1) { S3.setLabels([]); S3.render(); return; }
+    M.inp = S3.boxes(c.ci * c.I * c.I); M.inpIdx = [];
+    let i = 0;
+    for (let ch = 0; ch < c.ci; ch++) for (let r = 0; r < c.I; r++) for (let q = 0; q < c.I; q++) { S3.place(M.inp, i++, q + c.P, -(r + c.P), -ch); M.inpIdx.push([ch, r + c.P, q + c.P]); }
+    M.pad = S3.boxes(c.ci * (g.Ip * g.Ip - c.I * c.I), 0.82, { color: 0xbbbbbb, transparent: true, opacity: 0.22, depthWrite: false });
+    i = 0;
+    for (let ch = 0; ch < c.ci; ch++) for (let r = 0; r < g.Ip; r++) for (let q = 0; q < g.Ip; q++) {
+      if (r >= c.P && r < c.P + c.I && q >= c.P && q < c.P + c.I) continue; S3.place(M.pad, i++, q, -r, -ch);
+    }
+    M.ker = S3.boxes(c.co * c.K * c.K * c.ci); M.kerIdx = [];
+    i = 0;
+    for (let j = 0; j < c.co; j++) for (let ch = 0; ch < c.ci; ch++) for (let a = 0; a < c.K; a++) for (let b = 0; b < c.K; b++) {
+      S3.place(M.ker, i++, g.kx0 + (j % g.cols) * (c.K + 1) + b, g.yK - Math.floor(j / g.cols) * (c.K + 1) - a, -ch); M.kerIdx.push(j);
+    }
+    if (c.bias) {
+      const sg = new T.SphereGeometry(0.32, 12, 8);
+      for (let j = 0; j < c.co; j++) {
+        const s = S3.add(new T.Mesh(sg, new T.MeshLambertMaterial({ color: kColor(j) })));
+        s.position.set(g.kx0 + (j % g.cols) * (c.K + 1) + (c.K - 1) / 2, g.yK - Math.floor(j / g.cols) * (c.K + 1) + 0.9, 0.4);
+      }
+    }
+    M.out = S3.boxes(c.co * g.O * g.O);
+    i = 0;
+    for (let j = 0; j < c.co; j++) for (let r = 0; r < g.O; r++) for (let q = 0; q < g.O; q++) S3.place(M.out, i++, g.ox0 + q, g.yOut - r, -j);
+    [M.inp, M.pad, M.ker, M.out].forEach(m => { m.instanceMatrix.needsUpdate = true; });
+    M.win = S3.outline(c.K + 0.08, c.K + 0.08, c.ci + 0.08);
+    M.winFill = S3.add(new T.Mesh(new T.BoxGeometry(c.K, c.K, c.ci), new T.MeshBasicMaterial({ color: 0xff00aa, transparent: true, opacity: 0.12, depthWrite: false })));
+    M.kOut = S3.outline(c.K + 0.2, c.K + 0.2, c.ci + 0.2);
+    M.oOut = S3.outline(1.1, 1.1, 1.1);
+    M.l1 = S3.line([[0, 0, 0], [0, 0, 0]], 0xff00aa); M.l2 = S3.line([[0, 0, 0], [0, 0, 0]], 0x999999);
+    S3.setLabels([
+      { pos: [(g.Ip - 1) / 2, 1.2, 0], text: `อินพุต ${c.ci} × ${c.I} × ${c.I}`, color: '#3b6fd6' },
+      { pos: [g.kx0 + (g.kw - 1) / 2, g.yK + 1.2 + (c.bias ? 0.6 : 0), 0], text: `kernel ${c.co} ก้อน (ก้อนละ ${c.ci} × ${c.K} × ${c.K})`, color: '#b4441e' },
+      { pos: [g.ox0 + (g.O - 1) / 2, g.yOut + 1.2, 0], text: `เอาต์พุต ${c.co} × ${g.O} × ${g.O}`, color: '#2f7a46' },
+    ]);
+    S3.setBounds([-0.5, Math.min(-(g.Ip - 1), g.yK - (g.kh - 1), g.yOut - (g.O - 1)) - 0.5, -(Math.max(c.ci, c.co) - 1) - 0.5],
+                 [g.ox0 + g.O - 0.5, Math.max(0, g.yK, g.yOut) + 1.8, 0.5]);
+    paint();
+  }
+  // สีตามสถานะปัจจุบัน
+  function paint() {
+    if (!S3.ok || !M.inp) return;
+    const c = cfg, g = geo(c), O = g.O, T = S3.T, col = new T.Color(), white = new T.Color(0xffffff), cur = curStep();
+    const inWin = (pr, pc) => cur && pr >= cur.r * c.S && pr < cur.r * c.S + c.K && pc >= cur.c * c.S && pc < cur.c * c.S + c.K;
+    M.inpIdx.forEach(([ch, pr, pc], i) => {
+      col.set(inColor(ch)); if (inWin(pr, pc)) col.lerp(new T.Color(kColor(cur.j)), 0.55).offsetHSL(0, 0.1, -0.08);
+      M.inp.setColorAt(i, col);
+    });
+    M.kerIdx.forEach((j, i) => { col.set(kColor(j)); if (cur && j !== cur.j) col.lerp(white, 0.55); M.ker.setColorAt(i, col); });
+    for (let i = 0; i < c.co * O * O; i++) { col.set(i < done ? kColor(Math.floor(i / (O * O))) : '#eeeeee'); M.out.setColorAt(i, col); }
+    [M.inp, M.ker, M.out].forEach(m => { if (m.instanceColor) m.instanceColor.needsUpdate = true; });
+    [M.win, M.winFill, M.kOut, M.oOut, M.l1, M.l2].forEach(o => { o.visible = !!cur; });
+    if (cur) {
+      const wc = [cur.c * c.S + (c.K - 1) / 2, -(cur.r * c.S + (c.K - 1) / 2), -(c.ci - 1) / 2];
+      const kc = [g.kx0 + (cur.j % g.cols) * (c.K + 1) + (c.K - 1) / 2, g.yK - Math.floor(cur.j / g.cols) * (c.K + 1) - (c.K - 1) / 2, -(c.ci - 1) / 2];
+      const oc = [g.ox0 + cur.c, g.yOut - cur.r, -cur.j];
+      M.win.position.set(...wc); M.winFill.position.set(...wc); M.kOut.position.set(...kc); M.oOut.position.set(...oc);
+      S3.setLine(M.l1, [wc, oc]); S3.setLine(M.l2, [kc, wc]);
+    }
+    S3.render();
+  }
+
+  function readInputs() {
+    const cl = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(+v || lo)));
+    cfg = { I: cl($('s53_i').value, 3, 12), ci: cl($('s53_ci').value, 1, 16), co: cl($('s53_co').value, 1, 16),
+            K: +$('s53_k').value, S: +$('s53_s').value, P: +$('s53_p').value, bias: $('s53_b').checked, real: null };
+  }
+  function setPre(p) {
+    stop(); done = 0;
+    $('s53_i').value = p.I; $('s53_ci').value = p.ci; $('s53_co').value = p.co; $('s53_k').value = p.k; $('s53_s').value = p.s; $('s53_p').value = p.p; $('s53_b').checked = !!p.bias;
+    cfg = { I: p.I, ci: p.ci, co: p.co, K: p.k, S: p.s, P: p.p, bias: !!p.bias, real: p.real || null };
+    S3.view.zoom = 1; build(); text(); hl(p);
+  }
+  function hl(p) { root.querySelectorAll('[data-pi]').forEach(b => b.classList.toggle('on', !!p && presets[+b.dataset.pi] === p)); }
+  function renderPre() {
+    $('s53_pre').innerHTML = presets.map((p, i) => `<button data-pi="${i}">${p.label}</button>`).join(' ');
+    root.querySelectorAll('[data-pi]').forEach(b => b.addEventListener('click', () => setPre(presets[+b.dataset.pi])));
+  }
+  const total = () => { const g = geo(cfg); return g.O < 1 ? 0 : cfg.co * g.O * g.O; };
+  function stop() { if (timer) { clearInterval(timer); timer = null; } $('s53_play').textContent = '▶ เล่น'; }
+  $('s53_step').addEventListener('click', () => { stop(); done = done >= total() ? 1 : done + 1; paint(); text(); });
+  $('s53_all').addEventListener('click', () => { stop(); done = total(); paint(); text(); });
+  $('s53_play').addEventListener('click', () => {
+    if (timer) { stop(); return; }
+    if (done >= total()) done = 0;
+    const ms = Math.max(25, Math.min(450, 7000 / Math.max(total(), 1)));
+    timer = setInterval(() => { done++; if (done >= total()) stop(); paint(); text(); }, ms);
+    $('s53_play').textContent = '⏸ หยุด';
+  });
+  ['s53_i', 's53_ci', 's53_co', 's53_k', 's53_s', 's53_p', 's53_b'].forEach(id => $(id).addEventListener('change', () => { stop(); done = 0; readInputs(); build(); text(); hl(null); }));
+  root.querySelector('[data-act=reset]').addEventListener('click', () => { S3.setView('iso'); setPre(presets[0]); });
+  renderPre(); setPre(presets[0]);
+
+  DATA5.then(d => {
+    const sizeIn = { 0: 640, 1: 320, 3: 160 };
+    // ชั้นจริง: จำนวนช่อง, K, S, P ตามโมเดล แต่ย่อขนาดภาพเหลือ 8 เพื่อให้วาดได้
+    d.convs.filter(c => c.index <= 1).forEach(c => presets.push({
+      label: `ชั้น ${c.index} ของ yolo11n-seg (${c.c_in} → ${c.c_out})`, I: 8, ci: c.c_in, co: c.c_out, k: c.k, s: c.stride, p: c.padding, bias: c.bias,
+      real: { I: sizeIn[c.index], O: c.out_shape[2] },
+    }));
+    renderPre(); hl(presets[0]);
+    // ตารางในหัวข้อ 🔗
+    const yaml = { 0: '[-1, 1, Conv, [64, 3, 2]]  # 0-P1/2', 1: '[-1, 1, Conv, [128, 3, 2]]  # 1-P2/4', 3: '[-1, 1, Conv, [256, 3, 2]]  # 3-P3/8' };
+    $('pipe_tab').insertAdjacentHTML('beforeend', d.convs.map(c =>
+      `<tr><td>${c.index}</td><td><code>${yaml[c.index]}</code></td><td>${c.k}, ${c.stride}, ${c.padding}</td><td>${c.c_in} → ${c.c_out}</td><td>(${c.out_shape.join(', ')})</td><td>${fmtInt(c.conv_params)}</td></tr>`).join(''));
+  });
+})();
+
+/* =========================================================
+   ซิม 5.4 ชั้นแรกจริงของ yolo11n-seg
+   ========================================================= */
+(function () {
+  const root = $('s54'), S = 640, O = 320;
+  // ภาพผลไม้ 1280×720 หลัง letterbox เป็น 640×640 (เติมขอบสี 114 บน-ล่าง)
+  const lb = letterbox(1280, 720, 'square');
+  const inCv = document.createElement('canvas'); inCv.width = S; inCv.height = S;
+  const ic = inCv.getContext('2d');
+  ic.fillStyle = 'rgb(114,114,114)'; ic.fillRect(0, 0, S, S);
+  ic.drawImage(makeFruitImage(lb.newW, lb.newH), lb.left, lb.top);
+  { const { ctx } = setupCanvas($('s54_in')); ctx.drawImage(inCv, 0, 0, 320, 320); }
+  const px = ic.getImageData(0, 0, S, S).data;
+  let D = null, maps = null, sel = 0, pick = null;
+
+  function compute() {
+    const x = [0, 1, 2].map(c => { const a = new Float32Array(S * S); for (let i = 0; i < S * S; i++) a[i] = px[i * 4 + c] / 255; return a; });
+    maps = [];
+    for (let k = 0; k < 16; k++) {
+      const w = D.weight[k], g = D.bn.gamma[k] / Math.sqrt(D.bn.var[k] + D.bn.eps), sh = D.bn.beta[k] - D.bn.mean[k] * g;
+      const out = new Float32Array(O * O);
+      for (let oy = 0; oy < O; oy++) for (let ox = 0; ox < O; ox++) {
+        let s = 0;
+        for (let c = 0; c < 3; c++) { const xc = x[c], wc = w[c];
+          for (let a = 0; a < 3; a++) { const y = oy * 2 - 1 + a; if (y < 0 || y >= S) continue; const row = y * S, wr = wc[a];
+            for (let b = 0; b < 3; b++) { const xx = ox * 2 - 1 + b; if (xx < 0 || xx >= S) continue; s += xc[row + xx] * wr[b]; } } }
+        const z = s * g + sh;
+        out[oy * O + ox] = z / (1 + Math.exp(-z));   // SiLU
+      }
+      let mn = Infinity, mx = -Infinity; for (const v of out) { if (v < mn) mn = v; if (v > mx) mx = v; }
+      // ช่วงสีใช้เปอร์เซ็นไทล์ 1–99 เพื่อไม่ให้ค่าสุดโต่งไม่กี่จุดทำให้ภาพมืดทั้งภาพ
+      const sorted = Float32Array.from(out).sort();
+      maps.push({ out, mn, mx, lo: sorted[Math.floor(O * O * 0.01)], hi: sorted[Math.floor(O * O * 0.99)] });
+    }
+    window.CH5_L0 = { maps, input: inCv };   // ใช้ตรวจเทียบกับ PyTorch
+  }
+  function mapCanvas(k) {
+    const { out, lo, hi } = maps[k], c = document.createElement('canvas'); c.width = O; c.height = O;
+    const cx = c.getContext('2d'), im = cx.createImageData(O, O);
+    for (let i = 0; i < O * O; i++) { const v = Math.round(Math.max(0, Math.min(1, (out[i] - lo) / (hi - lo || 1))) * 255); im.data.set([v, v, v, 255], i * 4); }
+    cx.putImageData(im, 0, 0); return c;
+  }
+  function tiles() {
+    $('s54_tiles').innerHTML = D.weight.map((_, k) => `<div><canvas width="3" height="3" data-k="${k}"></canvas><span>${k}</span></div>`).join('');
+    root.querySelectorAll('#s54_tiles canvas').forEach(cv => {
+      const k = +cv.dataset.k, w = D.weight[k], m = Math.max(...w.flat(2).map(Math.abs));
+      const cx = cv.getContext('2d'), im = cx.createImageData(3, 3);
+      for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) im.data.set([0, 1, 2].map(c => 128 + 127 * w[c][a][b] / m).concat(255), (a * 3 + b) * 4);
+      cx.putImageData(im, 0, 0);
+      cv.addEventListener('click', () => { sel = k; draw(); });
+    });
+  }
+  // ---------- มุมมอง 3 มิติ: แผ่นภาพซ้อนกันตามแกนช่อง ----------
+  const S3 = new Scene3D($('s54_3d'), { views: { iso: [-0.75, 1.15] } }), P3 = {};
+  S3.bindButtons(root);
+  function chanCanvas(c) {   // ภาพอินพุตช่องเดียว ย้อมสีตามช่อง
+    const cv = document.createElement('canvas'); cv.width = S; cv.height = S;
+    const cx = cv.getContext('2d'), im = cx.createImageData(S, S);
+    for (let i = 0; i < S * S; i++) { const v = px[i * 4 + c]; im.data.set([c === 0 ? v : 0, c === 1 ? v : 0, c === 2 ? v : 0, 255], i * 4); }
+    cx.putImageData(im, 0, 0); return cv;
+  }
+  function build3d() {
+    if (!S3.ok) return;
+    const T = S3.T, plane = new T.PlaneGeometry(8, 8); plane.userData.shared = true;
+    const mk = cv => { const tex = new T.CanvasTexture(cv); tex.magFilter = T.NearestFilter; return new T.MeshBasicMaterial({ map: tex, side: T.DoubleSide }); };
+    P3.inp = [0, 1, 2].map(c => S3.add(new T.Mesh(plane, mk(chanCanvas(c)))));
+    P3.out = maps.map((_, k) => { const m = S3.add(new T.Mesh(plane, mk(mapCanvas(k)))); m.userData.k = k; return m; });
+    P3.edge = new T.EdgesGeometry(plane); P3.edge.userData.shared = true;
+    P3.out.forEach(m => m.add(new T.LineSegments(P3.edge, new T.LineBasicMaterial({ color: 0xbbbbbb }))));
+    P3.inp.forEach(m => m.add(new T.LineSegments(P3.edge, new T.LineBasicMaterial({ color: 0xbbbbbb }))));
+    P3.sel = S3.add(new T.LineSegments(P3.edge, new T.LineBasicMaterial({ color: 0xff00aa })));
+    P3.arrow = S3.line([[0, 0, 0], [0, 0, 0]], 0x888888);
+    S3.pickables = P3.out;
+    S3.onPick = hit => { if (hit && hit.object.userData.k !== undefined) { sel = hit.object.userData.k; draw(); } };
+    layout3d();
+  }
+  function layout3d() {
+    if (!S3.ok || !P3.out) return;
+    const g = +$('s54_gap').value, zi0 = 4 + 3 * g;     // อินพุตอยู่ด้านหน้า ห่างจากก้อนเอาต์พุต
+    P3.inp.forEach((m, c) => m.position.set(0, 0, zi0 + (2 - c) * g));
+    P3.out.forEach((m, k) => m.position.set(0, 0, -k * g));
+    S3.setLine(P3.arrow, [[4.6, 0, zi0], [4.6, 0, 0.2]]);
+    S3.setLabels([
+      { pos: [0, 4.6, zi0 + g], text: 'อินพุต 3 × 640 × 640', color: '#3b6fd6' },
+      { pos: [0, 4.6, -7.5 * g], text: 'เอาต์พุต 16 × 320 × 320', color: '#2f7a46' },
+      { pos: [4.8, 0.6, (zi0 + 0.2) / 2], text: 'Conv ชั้น 0', color: '#888' },
+    ]);
+    S3.setBounds([-4, -4, -15 * g - 0.1], [4.5, 5, zi0 + 2 * g + 0.1]);
+    update3d();
+  }
+  function update3d() {
+    if (!S3.ok || !P3.out) return;
+    P3.sel.position.copy(P3.out[sel].position); P3.sel.scale.set(1.04, 1.04, 1);
+    S3.render();
+  }
+  $('s54_gap').addEventListener('input', layout3d);
+
+  function draw() {
+    root.querySelectorAll('#s54_tiles canvas').forEach(cv => cv.classList.toggle('on', +cv.dataset.k === sel));
+    if (!maps) return;
+    update3d();
+    const { ctx } = setupCanvas($('s54_map'));
+    ctx.imageSmoothingEnabled = false; ctx.drawImage(mapCanvas(sel), 0, 0, 320, 320);
+    if (pick) { ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 2; ctx.strokeRect(pick[1] - 4, pick[0] - 4, 9, 9); }
+    $('s54_maplbl').textContent = `feature map ช่องที่ ${sel} (320 × 320) สว่าง = ค่าสูง`;
+    const w = D.weight[sel], m = maps[sel];
+    const tab = (c, name, col) => `<div class="ktab" style="vertical-align:top"><div style="grid-column:span 3;color:${col};font-weight:700">ช่อง ${name}</div>` +
+      w[c].flat().map(v => `<div style="background:${signedColor(v, 0.5)}">${v.toFixed(2)}</div>`).join('') + '</div>';
+    $('s54_out').innerHTML =
+      `<b>kernel ${sel}</b>: weight 3 × 3 × 3 = 27 ตัว (แดง = บวก, น้ำเงิน = ลบ)<br>${tab(0, 'R', '#d6453d')}${tab(1, 'G', '#2f9e55')}${tab(2, 'B', '#3b6fd6')}<br>` +
+      `BatchNorm: γ = ${D.bn.gamma[sel].toFixed(3)}, β = ${D.bn.beta[sel].toFixed(3)} · ค่าหลัง SiLU ในช่องนี้ต่ำสุด ${m.mn.toFixed(3)} สูงสุด ${m.mx.toFixed(3)}` +
+      (pick ? `<br>ค่าที่ (แถว ${pick[0]}, คอลัมน์ ${pick[1]}) = <b>${m.out[pick[0] * O + pick[1]].toFixed(4)}</b>` : '<br><span class="muted">คลิกบน feature map เพื่ออ่านค่า ณ ตำแหน่งนั้น</span>');
+    // ทั้ง 16 ช่อง
+    const all = setupCanvas($('s54_all')), cell = 76, gap = 4;
+    all.ctx.fillStyle = '#fff'; all.ctx.fillRect(0, 0, all.W, all.H);
+    for (let k = 0; k < 16; k++) {
+      const x = (k % 8) * (cell + gap), y = Math.floor(k / 8) * (cell + 20 + gap);
+      all.ctx.drawImage(mapCanvas(k), x, y, cell, cell);
+      if (k === sel) { all.ctx.strokeStyle = '#ff00ff'; all.ctx.lineWidth = 3; all.ctx.strokeRect(x, y, cell, cell); }
+      all.ctx.fillStyle = '#555'; all.ctx.font = '11px Sarabun, sans-serif'; all.ctx.textAlign = 'center'; all.ctx.fillText(`ช่อง ${k}`, x + cell / 2, y + cell + 13);
+    }
+  }
+  $('s54_map').addEventListener('pointerdown', e => {
+    if (!maps) return; const [x, y] = canvasXY($('s54_map'), e, 320, 320);
+    pick = [Math.max(0, Math.min(O - 1, Math.floor(y))), Math.max(0, Math.min(O - 1, Math.floor(x)))]; draw();
+  });
+  $('s54_all').addEventListener('pointerdown', e => {
+    const { W, H } = setupCanvas($('s54_all')), [x, y] = canvasXY($('s54_all'), e, W, H);
+    const c = Math.floor(x / 80), r = Math.floor(y / 100); if (c < 8 && r < 2) { sel = r * 8 + c; draw(); }
+  });
+  root.querySelector('[data-act=reset]').addEventListener('click', () => { sel = 0; pick = null; draw(); });
+  DATA5.then(d => { D = d; tiles(); draw(); setTimeout(() => { compute(); build3d(); draw(); }, 30); })
+    .catch(() => { $('s54_out').innerHTML = '⚠ โหลดข้อมูลไม่ได้ ต้องเปิดผ่าน <code>python -m http.server 8000</code>'; });
+})();
+
+/* =========================================================
+   🔗 และแบบทดสอบ
+   ========================================================= */
+renderPipeline($('pipe'), ['backbone']);
+
+initQuiz($('quiz'), [
+  {
+    q: 'ภาพขนาด 32 × 32 ใช้ kernel 5 × 5, stride 1, padding 0 จะได้ feature map ขนาดเท่าใด',
+    options: ['32 × 32', '28 × 28', '27 × 27', '30 × 30'],
+    answer: 1,
+    explain: 'O = ⌊(32 + 0 − 5)/1⌋ + 1 = 27 + 1 = 28',
+  },
+  {
+    q: 'ชั้นแรกของ YOLO11 รับภาพ 640 × 640 ด้วย kernel 3, stride 2, padding 1 ได้ขนาดเท่าใด',
+    options: ['319 × 319', '320 × 320', '638 × 638', '160 × 160'],
+    answer: 1,
+    explain: 'O = ⌊(640 + 2 − 3)/2⌋ + 1 = ⌊639/2⌋ + 1 = 319 + 1 = 320 ซึ่งตรงกับ shape (1, 16, 320, 320) ที่วัดจากโมเดลจริง',
+  },
+  {
+    q: 'Conv ที่มี kernel 3 × 3, C_in = 16, C_out = 32 และไม่มี bias มี weight กี่ตัว',
+    options: ['288', '4,608', '1,536', '9 × 32 = 288'],
+    answer: 1,
+    explain: '3 × 3 × 16 × 32 = 4,608 ซึ่งตรงกับชั้นที่ 1 ของ yolo11n-seg (อย่าลืมคูณ C_in เพราะ kernel แต่ละตัวลึกเท่าจำนวนช่องอินพุต)',
+  },
+  {
+    q: 'อินพุตมี 64 ช่อง ต้องการเอาต์พุต 128 ช่อง ข้อใดถูกต้อง',
+    options: ['ใช้ kernel 64 ตัว แต่ละตัวลึก 128', 'ใช้ kernel 128 ตัว แต่ละตัวลึก 64', 'ใช้ kernel 1 ตัว ลึก 192', 'ใช้ kernel 128 ตัว แต่ละตัวลึก 1'],
+    answer: 1,
+    explain: 'ความลึกของ kernel = จำนวนช่องอินพุต (64) และจำนวน kernel = จำนวนช่องเอาต์พุต (128)',
+  },
+  {
+    q: 'เปลี่ยนภาพอินพุตจาก 640 × 640 เป็น 1280 × 1280 โดยใช้ Conv ชั้นเดิม ข้อใดถูกต้อง',
+    options: ['จำนวนพารามิเตอร์เพิ่ม 4 เท่า', 'จำนวนพารามิเตอร์เท่าเดิม แต่จำนวนการคำนวณเพิ่มราว 4 เท่า', 'ทั้งพารามิเตอร์และการคำนวณเท่าเดิม', 'ต้องเปลี่ยนขนาด kernel'],
+    answer: 1,
+    explain: 'kernel ชุดเดิมถูกใช้ซ้ำทุกตำแหน่ง (weight sharing) พารามิเตอร์จึงไม่ขึ้นกับขนาดภาพ แต่ตำแหน่งที่ต้องคำนวณเพิ่มเป็น 2 × 2 = 4 เท่า',
+  },
+  {
+    q: 'kernel [[−1, 0, 1], [−1, 0, 1], [−1, 0, 1]] ให้ค่าบวกสูงเมื่อภาพใต้หน้าต่างเป็นอย่างไร',
+    options: ['สว่างทั้งหมด', 'มืดทางซ้าย สว่างทางขวา (ขอบแนวตั้ง)', 'มืดด้านบน สว่างด้านล่าง', 'สีเรียบทั้งหน้าต่าง'],
+    answer: 1,
+    explain: 'คอลัมน์ขวาคูณ +1 คอลัมน์ซ้ายคูณ −1 ผลรวมจึงใหญ่เมื่อขวาสว่างกว่าซ้าย ส่วนพื้นที่สีเรียบได้ 0 เพราะบวกและลบหักล้างกัน',
+  },
+  {
+    q: 'ตัวเลขใน kernel ของ YOLO11 ได้มาอย่างไร',
+    options: ['วิศวกรออกแบบด้วยมือเป็น kernel ตรวจขอบ', 'สุ่มใหม่ทุกครั้งที่ทำนาย', 'เริ่มจากค่าสุ่มแล้วปรับด้วย gradient descent ระหว่างเทรน', 'คัดลอกจาก Photoshop'],
+    answer: 2,
+    explain: 'kernel คือ weight ธรรมดา เรียนรู้ด้วย backpropagation และ gradient descent (บทที่ 3–4) และเมื่อใช้ yolo11n-seg.pt ก็ได้ kernel ที่เทรนกับ COCO มาแล้ว (บทที่ 4)',
+  },
+  {
+    q: 'ทำไม Conv ใน YOLO11 จึงตั้ง bias=False',
+    options: ['เพื่อให้เทรนช้าลง', 'เพราะ BatchNorm ที่ตามมามีค่าเลื่อน β ของตัวเองอยู่แล้ว bias จึงซ้ำซ้อน', 'เพราะ bias ใช้กับภาพสีไม่ได้', 'เพราะ SiLU ไม่รับ bias'],
+    answer: 1,
+    explain: 'ใน nn/modules/conv.py: Conv2d(..., bias=False) ตามด้วย BatchNorm2d ซึ่งลบค่าเฉลี่ยออกแล้วเลื่อนด้วย β ถ้ามี bias ก็จะถูกลบทิ้งในขั้น BatchNorm อยู่ดี',
+  },
+]);
+</script>
+</body>
+</html>

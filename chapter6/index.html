@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>บทที่ 6 จาก Convolution สู่ CNN ทั้งเครือข่าย | เข้าใจ YOLO11-seg</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    .v3d { width: 100%; height: 400px; border: 1px solid var(--line); border-radius: 6px; }
+    .maps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .maps figure { margin: 0; text-align: center; }
+    .maps img { width: 92px; height: 92px; image-rendering: pixelated; border: 1px solid var(--line); display: block; }
+    .maps figcaption { font-size: 0.72rem; margin: 0; }
+    .cgrid { display: inline-grid; gap: 2px; }
+    .cgrid div { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; font: 14px Consolas, monospace; border-radius: 3px; border: 1px solid #ddd; }
+    .cgrid .win { outline: 3px solid #ff00ff; outline-offset: -1px; }
+    .cgrid .best { background: #ffe08a !important; font-weight: 700; }
+    .conv-row { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; margin: 8px 0; }
+    .conv-row .lbl { font-size: 0.85rem; color: var(--muted); margin-bottom: 3px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="topnav"><a href="../">← สารบัญ</a> · หน่วยที่ 2 CNN</p>
+  <h1>บทที่ 6 จาก Convolution สู่ CNN ทั้งเครือข่าย</h1>
+  <p class="muted">ซ้อน Conv หลายสิบชั้นให้กลายเป็น Backbone ของ YOLO11: ภาพเล็กลง ช่องเพิ่มขึ้น และแต่ละจุดมองเห็นกว้างขึ้น</p>
+
+  <!-- ===================== 1. วัตถุประสงค์ ===================== -->
+  <div class="box info">
+    <span class="box-title">🎯 วัตถุประสงค์การเรียนรู้</span>
+    เมื่อจบบทนี้ คุณควรทำสิ่งต่อไปนี้ได้
+    <ol>
+      <li>อธิบายได้ว่าทำไมเมื่อซ้อนชั้นแล้ว feature map เล็กลงแต่จำนวนช่องเพิ่มขึ้น และบอกความหมายของ P1–P5 (stride 2, 4, 8, 16, 32) ได้</li>
+      <li>อธิบายลำดับขั้นของ feature (ขอบ → รูปทรง → วัตถุ) และคำนวณ receptive field ของชั้นที่ซ้อนกันได้</li>
+      <li>อธิบายการทำงานของ max pooling และ Batch Normalization ได้</li>
+      <li>อธิบายได้ว่า residual connection ช่วยให้ gradient ไหลถึงชั้นต้น ๆ ได้อย่างไร</li>
+      <li>อธิบายแนวคิด CSP (แบ่งช่องเป็นสองทางแล้วต่อกลับ) และอ่านโครงสร้างบล็อก C3k2 ของ YOLO11 ได้</li>
+    </ol>
+  </div>
+
+  <!-- ===================== 2. ทบทวน ===================== -->
+  <h2>ทบทวนความรู้เดิม</h2>
+  <p>
+    ในบทที่ 5 คุณเห็นชั้น Conv ชั้นแรกของ yolo11n-seg ที่มี kernel 16 ตัว แต่ละตัวมองหน้าต่างแค่ 3 × 3 พิกเซล จึงเห็นได้แค่ขอบ จุด และสี
+    แต่การบอกว่า "นี่คือแอปเปิล" ต้องมองเห็นทั้งลูก ซึ่งกว้างหลายสิบถึงหลายร้อยพิกเซล บทนี้จะแสดงว่าการ <strong>ซ้อน Conv หลายชั้น</strong>
+    ทำให้แต่ละจุดในชั้นลึกมองเห็นพื้นที่กว้างขึ้นเรื่อย ๆ ได้อย่างไร และเครื่องมือเสริมอะไรบ้าง (pooling, BatchNorm, residual, CSP) ที่ทำให้เครือข่ายลึก ๆ เทรนได้จริง
+  </p>
+
+  <!-- ===================== 3. เนื้อหา ===================== -->
+  <h2>6.1 ซ้อนชั้น: ภาพเล็กลง ช่องเพิ่มขึ้น</h2>
+  <p>
+    Backbone ของ YOLO11 สลับระหว่าง Conv ที่ stride 2 (ลดขนาดภาพลงครึ่งหนึ่ง) กับบล็อกประมวลผลที่ขนาดคงเดิม (C3k2)
+    ทุกครั้งที่ภาพเล็กลง จำนวนช่องมักเพิ่มขึ้น เหตุผลคือ ตัวเลขแต่ละตัวในชั้นลึกต้องสรุปพื้นที่ที่กว้างขึ้นและหลากหลายขึ้น จึงต้องมี "ช่อง" ไว้เก็บลวดลายหลายแบบ
+    ขณะที่ความละเอียดของตำแหน่งลดลงได้ เพราะไม่จำเป็นต้องรู้ทุกพิกเซลแล้ว
+  </p>
+  <p>
+    Ultralytics เรียกระดับความละเอียดเป็น <strong>P1–P5</strong> ตัวเลขหลังขีดคือ <strong>stride</strong> หรือ "1 เซลล์ในชั้นนี้เท่ากับกี่พิกเซลของภาพอินพุต"
+  </p>
+  <div class="table-wrap">
+  <table id="ptab">
+    <tr><th>ระดับ</th><th>stride</th><th>ชั้นใน yolo11n-seg</th><th>ขนาด</th><th>ช่อง (รุ่น n)</th></tr>
+  </table>
+  </div>
+
+  <!-- ---------- ซิม 6.1 ---------- -->
+  <div class="sim" id="s61">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 6.1 หอคอย feature ของ yolo11n-seg (3 มิติ)</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองหมุนดูว่าก้อนแต่ละชั้น "แบนลงแต่หนาขึ้น" อย่างไร แล้วคลิกก้อนแต่ละก้อนเพื่อดู feature map จริงของภาพผลไม้ในชั้นนั้น เทียบชั้นต้นกับชั้นลึก</p>
+    <div class="controls">
+      รุ่น: <span id="s61_scale"></span>
+      <span class="small muted">ขนาดก้อน:</span>
+      <button data-sz="lin">สัดส่วนจริง</button><button data-sz="log">ย่อ-ขยายให้เห็นชัด</button>
+    </div>
+    <div class="controls">
+      <button data-view3d="iso">เฉียง</button><button data-view3d="front">หน้าตรง</button><button data-view3d="top">มองจากบน</button>
+      <button data-zoom3d="in">＋</button><button data-zoom3d="out">－</button>
+    </div>
+    <div id="s61_3d" class="v3d"></div>
+    <p class="small muted" style="margin:2px 0 6px">ความกว้าง-สูงของก้อน = ขนาด H × W · ความลึก = จำนวนช่อง · หน้าก้อนแสดงค่าเฉลี่ยของทุกช่องจากการรันโมเดลจริงกับภาพผลไม้ · ลากเพื่อหมุน คลิกก้อนเพื่อดูรายละเอียด</p>
+    <div class="sim-out" id="s61_out">กำลังโหลด data/yolo11-seg_shapes.json …</div>
+    <div class="maps" id="s61_maps"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s61_see">
+        <li>สัดส่วนจริง: ภาพอินพุตเป็นแผ่นบางกว้าง (3 × 640 × 640) ส่วนก้อนท้ายสุดเป็นแท่งยาวผอม (256 × 20 × 20) ภาพเล็กลง 32 เท่าในแต่ละด้าน แต่ช่องเพิ่มจาก 3 เป็น 256</li>
+        <li>จำนวนตัวเลขไม่ได้ลดลงตลอด: ชั้น 0 มี 16 × 320 × 320 = 1,638,400 ตัว มากกว่าภาพอินพุต (1,228,800) ด้วยซ้ำ แต่ชั้น 10 เหลือ 256 × 20 × 20 = 102,400 ตัว ข้อมูลถูก "สรุป" ลงเรื่อย ๆ โดยตัวเลขแต่ละตัวครอบคลุมพื้นที่กว้างขึ้น</li>
+        <li>คลิกชั้น 0, 1, 2: feature map ยังเป็นเส้นขอบคมเหมือนภาพลายเส้น · ชั้น 4 (P3): ยังเห็นรูปตะกร้าแต่หยาบลง · ชั้น 8 และ 10 (20 × 20): เหลือเป็นบล็อกใหญ่ ๆ บางช่องสว่างทั่วบริเวณตะกร้า บางช่องกลับสว่างที่พื้นหลังรอบ ๆ แทน</li>
+        <li>สลับรุ่น n → x: shape กว้าง-ยาวเหมือนเดิมทุกชั้น แต่ก้อนลึกขึ้นมาก (P5 จาก 256 เป็น 768 ช่อง) รุ่นใหญ่ต่างกันที่ "จำนวนช่อง" ไม่ใช่ขนาดภาพ</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>6.2 ลำดับขั้นของ feature: ขอบ → รูปทรง → วัตถุ</h2>
+  <p>
+    ชั้นต้นเห็นแค่หน้าต่างเล็ก ๆ จึงตอบสนองต่อขอบและสี (บทที่ 5) ชั้นถัดมารับ "แผนที่ขอบ" หลายช่องมารวมกัน จึงตอบสนองต่อมุม ลายสาน ส่วนโค้ง
+    และเมื่อลึกขึ้นอีก แต่ละช่องจะตอบสนองต่อบริเวณกว้าง ๆ ที่มีความหมาย เช่น "ตรงนี้มีกลุ่มผลไม้" หรือ "ตรงนี้เป็นพื้นหลัง"
+    ไม่มีใครกำหนดว่าชั้นไหนต้องเรียนอะไร ลำดับขั้นนี้เกิดขึ้นเองจากการเทรนด้วย gradient descent เพราะเป็นวิธีที่ช่วยลด loss ได้ดีที่สุด
+    ลองคลิกชั้น 0, 2, 4, 6, 8, 10 ในซิม 6.1 แล้วดูภาพ feature map ที่ได้
+  </p>
+
+  <h2>6.3 Receptive field: แต่ละจุดมองเห็นได้กว้างแค่ไหน</h2>
+  <p>
+    <strong>Receptive field</strong> ของเซลล์หนึ่งคือบริเวณบนภาพอินพุตที่มีผลต่อค่าของเซลล์นั้น
+    Conv 3 × 3 ชั้นเดียวเห็น 3 × 3 พิกเซล แต่ถ้าซ้อนอีกชั้น เซลล์ในชั้นที่สองจะรวม 3 × 3 เซลล์ของชั้นแรก ซึ่งแต่ละเซลล์เห็น 3 × 3 พิกเซลอีกที จึงเห็นกว้างขึ้น
+  </p>
+  <pre><code>Conv kernel K ที่อยู่ ณ stride s (เทียบกับภาพ) เพิ่ม receptive field อีก (K − 1) × s พิกเซล
+
+ชั้น 0  Conv 3, เริ่มที่ stride 1           : 1 + 2·1 = 3
+ชั้น 1  Conv 3, ที่ stride 2                : 3 + 2·2 = 7
+ชั้น 2  C3k2 (มี Conv 3×3 สองตัว), stride 4  : 7 + 2·4 + 2·4 = 23</code></pre>
+  <p>
+    stride จึงสำคัญมาก Conv 3 × 3 ตัวเดียวกันที่อยู่ในชั้นลึก (stride 32) เพิ่ม receptive field ได้ถึง 64 พิกเซล ขณะที่ในชั้นแรกเพิ่มได้แค่ 2 พิกเซล
+    ตารางด้านล่างเทียบสูตรนี้กับค่าที่ <strong>วัดจริง</strong> จาก yolo11n-seg.pt (หาว่าพิกเซลไหนของภาพมี gradient ไปถึงเซลล์กลางภาพ ด้วย <code>tools/extract_shapes.py</code>)
+  </p>
+  <div class="table-wrap">
+  <table id="rftab">
+    <tr><th>ชั้น</th><th>บล็อก</th><th>Conv/pool ที่เพิ่ม receptive field</th><th>ตามสูตร</th><th>วัดจริง</th></tr>
+  </table>
+  </div>
+
+  <!-- ---------- ซิม 6.2 ---------- -->
+  <div class="sim" id="s62">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 6.2 Receptive field แบบ 3 มิติ</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองคลิกเซลล์บนแผ่น P3, P4 และ P5 (แผ่นที่มีเส้นตาราง) แล้วดูกรวยสีชมพูที่ลากลงไปถึงภาพอินพุต สังเกตว่าแผ่นที่สูงขึ้นมองเห็นผลไม้ได้ทั้งลูกหรือทั้งตะกร้า</p>
+    <div class="controls">
+      <button data-view3d="iso">เฉียง</button><button data-view3d="front">มองข้าง</button><button data-view3d="top">มองจากบน</button>
+      <button data-zoom3d="in">＋</button><button data-zoom3d="out">－</button>
+      <label><input type="checkbox" id="s62_gap" checked> แยกแผ่นห่างกัน</label>
+    </div>
+    <div id="s62_3d" class="v3d" style="height:440px"></div>
+    <p class="small muted" style="margin:2px 0 6px">แผ่นล่างสุด = ภาพอินพุต 640 × 640 · แผ่นถัดขึ้นไป = feature map ของชั้น 0, 1, 4, 6, 8, 10 (วางให้ตรงกับภาพ) · คลิกบนแผ่นใดก็ได้</p>
+    <div class="sim-out" id="s62_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s62_see">
+        <li>เซลล์กลางของชั้น 4 (P3) เห็น 63 × 63 พิกเซล หรือราว 1% ของภาพ เล็กกว่าแอปเปิลแดงหนึ่งลูกเล็กน้อย (ในภาพนี้แอปเปิลกว้างราว 86 พิกเซล)</li>
+        <li>คลิกแผ่นชั้น 6 (P4): เห็น 207 × 207 พิกเซล เกือบเท่าตะกร้าทั้งใบ (กว้างราว 250 พิกเซล) · ชั้น 8 (P5): เห็น 495 × 495 หรือราว 60% ของภาพสำหรับเซลล์กลาง</li>
+        <li>คลิกเซลล์ริมแผ่นชั้น 8: กรอบบนภาพอินพุตถูกตัดที่ขอบภาพ เพราะส่วนที่เกินคือ padding ไม่มีข้อมูลจริง</li>
+        <li>คลิกแผ่นชั้น 10: ทุกเซลล์เห็นทั้งภาพเสมอ เพราะ attention ใน C2PSA ให้แต่ละเซลล์ดึงข้อมูลจากทุกตำแหน่งโดยตรง (บทที่ 9)</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="box tip">
+    <span class="box-title">💡 ทำไมต้องมีหลายระดับ (P3, P4, P5)</span>
+    เซลล์ใน P3 มีขนาด 8 × 8 พิกเซลและมองเห็นราว 63 พิกเซล เหมาะกับวัตถุเล็ก เช่น องุ่นหนึ่งลูก
+    ส่วนเซลล์ใน P5 ห่างกันทีละ 32 พิกเซลและมองเห็นเกือบทั้งภาพ เหมาะกับวัตถุใหญ่ เช่น ตะกร้าทั้งใบ
+    YOLO11 จึงทำนายจากทั้งสามระดับพร้อมกัน (บทที่ 9) ถ้าใช้แต่ P5 วัตถุเล็กกว่า 32 พิกเซลอาจหายไปในเซลล์เดียว
+  </div>
+
+  <h2>6.4 Max pooling</h2>
+  <p>
+    <strong>Pooling</strong> คือการสรุปหน้าต่างเล็ก ๆ ให้เหลือตัวเลขตัวเดียวโดยไม่มี weight ให้เรียน
+    <strong>Max pooling</strong> เลือกค่ามากที่สุดในหน้าต่าง ความหมายคือ "ในบริเวณนี้มีลวดลายนี้หรือไม่" โดยไม่สนว่าอยู่ตรงไหนพอดี
+    CNN รุ่นเก่าใช้ max pooling 2 × 2 stride 2 เพื่อลดขนาดภาพ แต่ YOLO11 ลดขนาดด้วย Conv stride 2 แทน (เรียนรู้ได้)
+    และใช้ max pooling เฉพาะในบล็อก <strong>SPPF</strong> เท่านั้น
+  </p>
+
+  <!-- ---------- ซิม 6.3 ---------- -->
+  <div class="sim" id="s63">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 6.3 Max pooling ทีละขั้น</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "ก้าวถัดไป" แล้วดูว่าแต่ละหน้าต่าง 2 × 2 เหลือค่าเดียว จากนั้นสลับเป็น average pooling แล้วเทียบผล</p>
+    <div class="controls">
+      <button data-pool="max">max pooling</button><button data-pool="avg">average pooling</button>
+      <button id="s63_step">ก้าวถัดไป</button><button id="s63_all">ทำทั้งหมด</button><button id="s63_new">🎲 สุ่มตัวเลขใหม่</button>
+    </div>
+    <div class="conv-row">
+      <div><div class="lbl">อินพุต 4 × 4</div><div class="cgrid" id="s63_in" style="grid-template-columns:repeat(4,38px)"></div></div>
+      <div><div class="lbl">ผลลัพธ์ 2 × 2 (kernel 2, stride 2)</div><div class="cgrid" id="s63_out" style="grid-template-columns:repeat(2,38px)"></div></div>
+    </div>
+    <div class="sim-out" id="s63_txt"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>ทุกหน้าต่างให้ค่าเดียว ขนาดจึงลดจาก 4 × 4 เหลือ 2 × 2 ตามสูตรเดียวกับ convolution: ⌊(4 − 2)/2⌋ + 1 = 2 แต่ไม่มี weight ให้เรียนเลย</li>
+        <li>max pooling เก็บค่าที่เด่นที่สุดไว้ ถ้าค่าสูงขยับไปอยู่ช่องอื่นในหน้าต่างเดียวกัน ผลลัพธ์ไม่เปลี่ยน ส่วน average pooling เฉลี่ยทุกค่า ค่าเด่นจึงถูกเจือจาง</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="box tip">
+    <span class="box-title">💡 SPPF ใน YOLO11 (ชั้นที่ 9)</span>
+    SPPF (Spatial Pyramid Pooling – Fast) ใช้ <code>MaxPool2d(kernel 5, stride 1, padding 2)</code> ซึ่ง <em>ไม่ลดขนาด</em> ภาพ (20 × 20 คงเดิม)
+    แต่ทำซ้ำต่อกัน 3 ครั้ง การ pool 5 × 5 ซ้อนกันเท่ากับมองหน้าต่าง 5, 9 และ 13 เซลล์ตามลำดับ แล้วนำผลทั้ง 4 ชุด (ก่อน pool + 3 ครั้ง) มาต่อกันตามแกนช่องและผ่าน Conv 1 × 1
+    ทุกเซลล์จึงได้รับ "บริบท" จากหลายขนาดพร้อมกัน แนวคิดนี้มาจาก SPP [He2015] และในตาราง receptive field ด้านบน ชั้นนี้คือจุดที่เซลล์กลางมองเห็นทั้งภาพ
+  </div>
+
+  <h2>6.5 Batch Normalization</h2>
+  <p>
+    ระหว่างเทรน ค่าในแต่ละช่องอาจมีขนาดต่างกันมาก ช่องหนึ่งอยู่ราว 40 อีกช่องอยู่ราว −3 และการกระจายเปลี่ยนไปทุกครั้งที่ weight ชั้นก่อนหน้าถูกปรับ ทำให้เทรนยากและต้องใช้ learning rate เล็ก
+    <strong>Batch Normalization (BatchNorm)</strong> [Ioffe2015] แก้ด้วยการปรับค่าของ <em>แต่ละช่อง</em> ให้มีค่าเฉลี่ย 0 และส่วนเบี่ยงเบนมาตรฐาน 1 ก่อน แล้วค่อยยืดและเลื่อนด้วยค่าที่เรียนรู้ได้
+  </p>
+  <pre><code>x̂ = (x − μ) / √(σ² + ε)        μ, σ² = ค่าเฉลี่ยและความแปรปรวนของช่องนั้น (คิดจากทุกภาพใน batch ทุกตำแหน่ง)
+y = γ · x̂ + β                   γ, β = parameter ที่เรียนรู้ได้ ช่องละ 1 คู่</code></pre>
+
+  <!-- ---------- ซิม 6.4 ---------- -->
+  <div class="sim" id="s64">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 6.4 BatchNorm คิดค่าเฉลี่ยจากอะไรบ้าง (3 มิติ)</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองเลือกช่องทีละช่องแล้วดูว่าลูกบาศก์ไหนถูกนำมาคิดค่าเฉลี่ย จากนั้นกด "ทำ BatchNorm" แล้วดูว่าทั้งสามช่องกลายเป็นขนาดเดียวกันหรือไม่</p>
+    <div class="controls">
+      ช่องที่เลือก: <button data-bc="0">ช่อง 0</button><button data-bc="1">ช่อง 1</button><button data-bc="2">ช่อง 2</button>
+      <button id="s64_bn">▶ ทำ BatchNorm</button>
+    </div>
+    <div class="controls">
+      <label>γ ของช่องที่เลือก <input type="range" id="s64_g" min="0.2" max="3" step="0.1" value="1"> <span class="mono" id="s64_gv"></span></label>
+      <label>β <input type="range" id="s64_b" min="-3" max="3" step="0.1" value="0"> <span class="mono" id="s64_bv"></span></label>
+      <button data-view3d="iso">เฉียง</button><button data-view3d="front">หน้าตรง</button><button data-zoom3d="in">＋</button><button data-zoom3d="out">－</button>
+    </div>
+    <div id="s64_3d" class="v3d" style="height:360px"></div>
+    <p class="small muted" style="margin:2px 0 6px">batch นี้มี 4 ภาพ (เรียงซ้ายไปขวา) แต่ละภาพมี 3 ช่อง (ซ้อนลึกเข้าไป) ขนาด 4 × 4 · ความสูงของลูกบาศก์ = ค่าของตัวเลข (แดง = บวก, น้ำเงิน = ลบ)</p>
+    <canvas id="s64_hist" width="640" height="120" style="width:100%"></canvas>
+    <div class="sim-out" id="s64_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s64_see">
+        <li>เลือกช่อง 2: ลูกบาศก์สีเข้มคือทุกตัวในชั้นของช่องนั้น <em>จากทั้ง 4 ภาพ</em> รวม 64 ตัว BatchNorm คิด μ และ σ แยกทีละช่อง แต่รวมข้ามภาพใน batch</li>
+        <li>ก่อน BatchNorm: ช่อง 0 อยู่ราว 8 (ส่วนเบี่ยงเบน 3.0), ช่อง 1 ราว −3 (0.5), ช่อง 2 ราว 40 (14.9) ขนาดต่างกันหลายสิบเท่า · หลัง BatchNorm: ทั้งสามช่องมีค่าเฉลี่ย 0.00 ส่วนเบี่ยงเบน 1.00 จุดในแถบด้านล่างซ้อนทับกันพอดี</li>
+        <li>ลองเลื่อน γ เป็น 2 และ β เป็น 1: ช่องนั้นจะมีส่วนเบี่ยงเบน 2 และค่าเฉลี่ย 1 เครือข่ายจึงยังเลือกขนาดที่เหมาะกับแต่ละช่องเองได้ ไม่ได้ถูกบังคับให้เป็น 0 และ 1 ตลอด</li>
+      </ul>
+    </div>
+  </div>
+  <div class="box tip">
+    <span class="box-title">💡 ตอนเทรนกับตอนใช้งานไม่เหมือนกัน</span>
+    ตอนเทรน μ และ σ² คิดจาก batch ปัจจุบัน และ BatchNorm จดค่าเฉลี่ยสะสม (running mean, running var) ไว้ด้วย
+    ตอนใช้งานจริง (predict) อาจมีภาพเดียว จึงใช้ค่าสะสมที่จดไว้แทน ผลลัพธ์จึงไม่ขึ้นกับว่ามีภาพอื่นอยู่ใน batch หรือไม่
+    ในบทที่ 5 คุณเห็นค่าเหล่านี้ของชั้นแรกแล้ว เช่น ช่อง 0 มี γ = 2.881, β = 6.664 · ใน YOLO11 ทุกบล็อก <code>Conv</code> คือ Conv2d → BatchNorm → SiLU
+  </div>
+
+  <h2>6.6 Residual connection: ทางลัดของ gradient</h2>
+  <p>
+    ในบทที่ 4 คุณเห็นว่า gradient ของชั้นต้น ๆ คือผลคูณของความชันทุกชั้นที่อยู่ระหว่างทาง ถ้าแต่ละชั้นมีความชันน้อยกว่า 1 ผลคูณจะหดจนเกือบ 0 (vanishing gradient)
+    <strong>Residual connection</strong> [He2016] แก้ด้วยการบวกอินพุตเข้ากับเอาต์พุตของบล็อกตรง ๆ
+  </p>
+  <pre><code>ไม่มีทางลัด:  y = F(x)          ความชัน dy/dx = F′(x)        (อาจเล็กมาก)
+มีทางลัด:    y = x + F(x)      ความชัน dy/dx = 1 + F′(x)    (มี 1 เป็นฐานเสมอ)</code></pre>
+  <p>
+    บล็อกจึงเรียนแค่ "ส่วนที่ต้องแก้" F(x) จากอินพุตเดิม ถ้าไม่มีอะไรต้องแก้ ก็ปล่อยให้ F(x) ≈ 0 แล้วส่งอินพุตผ่านไปเฉย ๆ
+    ใน YOLO11 บล็อก <code>Bottleneck</code> คือ Conv 3 × 3 สองชั้นที่มีทางลัด: <code>x + cv2(cv1(x))</code>
+  </p>
+
+  <!-- ---------- ซิม 6.5 ---------- -->
+  <div class="sim" id="s65">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 6.5 gradient ไหลถึงชั้นแรกได้แค่ไหน</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองเพิ่มความลึกเป็น 30 บล็อกแล้วเทียบแท่งสีเทา (ไม่มีทางลัด) กับแท่งสีน้ำเงิน (มีทางลัด) ที่บล็อกแรก ๆ</p>
+    <div class="controls">
+      <label>จำนวนบล็อก <input type="range" id="s65_n" min="4" max="40" step="1"> <span class="mono" id="s65_nv"></span></label>
+      <button id="s65_new">🎲 สุ่ม weight ใหม่</button>
+    </div>
+    <canvas id="s65_cv" width="640" height="240" style="width:100%"></canvas>
+    <div class="sim-out" id="s65_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s65_see">
+        <li>12 บล็อก ไม่มีทางลัด: gradient ที่ไหลถึงบล็อกแรกเหลือราว 3 × 10⁻¹⁵ แท่งสีเทาลดลงเป็นเส้นตรงบนแกน log เพราะถูกคูณด้วยตัวเลขที่น้อยกว่า 1 ซ้ำทุกบล็อก ชั้นต้น ๆ แทบไม่ได้เรียนรู้เลย</li>
+        <li>มีทางลัด: แท่งสีน้ำเงินอยู่ราว 0.05–1 ทุกบล็อก (ค่าเริ่มต้น) และยังอยู่ระดับเดิมแม้เพิ่มเป็น 40 บล็อก · ทดลองสุ่ม weight 40 แบบที่ 40 บล็อก: แบบมีทางลัดได้ค่าที่บล็อกแรกระหว่างราว 0.001 ถึง 10 ส่วนแบบไม่มีทางลัดเล็กกว่า 10⁻³⁵ ทุกครั้ง</li>
+        <li>ไม่ใช่แค่ gradient สัญญาณขาไปก็หายด้วย: เอาต์พุตของเครือข่าย 12 บล็อกแบบไม่มีทางลัดเหลือราว 10⁻¹⁵ ทั้งที่อินพุตคือ 1</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>6.7 CSP และบล็อก C3k2 ของ YOLO11</h2>
+  <p>
+    แนวคิด <strong>CSP (Cross Stage Partial)</strong> [Wang2020] คือ แบ่งช่องของ feature map เป็นสองส่วน ส่วนหนึ่งผ่านบล็อกที่คำนวณหนัก อีกส่วนข้ามไปเลย แล้วนำมาต่อกัน (concatenate) ตามแกนช่อง
+    ข้อดีคือ ประหยัดการคำนวณ (บล็อกหนักทำงานกับช่องแค่บางส่วน) และ gradient มีทางไหลตรงผ่านส่วนที่ข้ามไป
+  </p>
+  <p>
+    บล็อก <strong>C3k2</strong> ของ YOLO11 (ใน <code>nn/modules/block.py</code> สืบทอดจาก <code>C2f</code>) ทำตามขั้นตอนนี้
+  </p>
+  <ol>
+    <li><code>cv1</code>: Conv 1 × 1 ปรับจำนวนช่องเป็น 2c</li>
+    <li><code>chunk(2)</code>: แบ่งเป็นสองก้อน a และ b ก้อนละ c ช่อง</li>
+    <li>ก้อน b ผ่านบล็อกภายใน (<code>Bottleneck</code> หรือ <code>C3k</code>) ได้ y</li>
+    <li><code>cat([a, b, y])</code>: ต่อทั้งหมดตามแกนช่อง ได้ 3c ช่อง (เก็บทั้งของเดิมและของที่ผ่านการประมวลผล)</li>
+    <li><code>cv2</code>: Conv 1 × 1 รวมเป็นจำนวนช่องเอาต์พุต</li>
+  </ol>
+
+  <!-- ---------- ซิม 6.6 ---------- -->
+  <div class="sim" id="s66">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 6.6 ข้อมูลไหลผ่าน C3k2 (3 มิติ, ตัวเลขจริงของ yolo11n-seg)</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "ขั้นถัดไป" ทีละขั้นแล้วดูว่าก้อนถูกแบ่งและต่อกันตามแกนช่องอย่างไร จากนั้นดูว่าผลรวมพารามิเตอร์ของแต่ละส่วนเท่ากับของจริงหรือไม่</p>
+    <div class="controls">
+      บล็อก: <span id="s66_pick"></span>
+    </div>
+    <div class="controls">
+      <button id="s66_prev">◀ ขั้นก่อน</button><button id="s66_next">ขั้นถัดไป ▶</button>
+      <button data-view3d="iso">เฉียง</button><button data-view3d="front">หน้าตรง</button><button data-view3d="top">มองจากบน</button>
+      <button data-zoom3d="in">＋</button><button data-zoom3d="out">－</button>
+    </div>
+    <div id="s66_3d" class="v3d"></div>
+    <p class="small muted" style="margin:2px 0 6px">ความลึกของก้อน = จำนวนช่อง (ทุกก้อนมีขนาด H × W เท่ากันในบล็อกนี้ จึงวาดหน้าตัดเท่ากัน) · สีบอกว่าช่องมาจากไหน</p>
+    <div class="sim-out" id="s66_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s66_see">
+        <li>ชั้น 2: concat ได้ 48 ช่อง = a (16) + b (16) + y (16) เห็นเป็นก้อนเดียวที่มีสามสีเรียงตามความลึก concat คือการ "ซ้อนต่อกันตามแกนช่อง" ไม่มีการบวกหรือคูณ</li>
+        <li>ผลรวมพารามิเตอร์ที่คำนวณจากสูตรของแต่ละส่วน (cv1 + บล็อกภายใน + cv2) เท่ากับของจริงจากโมเดลทั้ง 8 บล็อก เช่น ชั้น 2 = 1,088 + 2,352 + 3,200 = 6,640</li>
+        <li>บล็อกภายในทำงานกับ b แค่ 16 จาก 32 ช่อง และ Bottleneck ยังบีบเหลือ 8 ช่องตรงกลาง ส่วน a ข้ามไปเลย นี่คือเหตุที่ CSP ประหยัดการคำนวณ ในชั้น 2 ส่วนที่ใช้พารามิเตอร์มากที่สุดกลับเป็น cv2 (3,200 จาก 6,640)</li>
+        <li>เลือกชั้น 6, 8, 22: บล็อกภายในเป็น C3k (Bottleneck 2 ตัวซ้อน) จึงหนักขึ้นมาก เช่น ชั้น 8 บล็อกภายในมี 181,248 จาก 346,112 พารามิเตอร์ และไม่มีเส้นทางลัดสีส้มให้เห็นในภาพ เพราะทางลัดซ่อนอยู่ใน Bottleneck ภายใน C3k อีกชั้น</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ===================== 5. อยู่ตรงไหน ===================== -->
+  <h2>🔗 อยู่ตรงไหนใน YOLO11-seg</h2>
+  <div id="pipe"></div>
+  <p>
+    ทั้งบทนี้คือ <strong>Backbone</strong> (ชั้น 0–10 ใน <code>yolo11-seg.yaml</code>): Conv stride 2 ห้าครั้งพาภาพจาก 640 ลงไปถึง 20 (P1 → P5)
+    สลับกับ C3k2 ที่ประมวลผลโดยไม่ลดขนาด แล้วปิดท้ายด้วย SPPF (บริบทหลายขนาด) และ C2PSA (attention ซึ่งจะพูดถึงในบทที่ 9)
+    เอาต์พุตของชั้น 4 (P3/8), 6 (P4/16) และ 10 (P5/32) จะถูกส่งต่อไปยัง Neck เพื่อผสมข้อมูลข้ามระดับ วัตถุขนาดเล็กตรวจได้ดีที่ P3 ส่วนวัตถุใหญ่ใช้ P4/P5
+  </p>
+
+  <!-- ===================== 6. สรุป ===================== -->
+  <h2>สรุปท้ายบท</h2>
+  <ul>
+    <li>Backbone ของ yolo11n-seg พาภาพ (3, 640, 640) ลงไปเป็น (256, 20, 20): ภาพเล็กลง 32 เท่าในแต่ละด้าน แต่จำนวนช่องเพิ่มจาก 3 เป็น 256</li>
+    <li>P1–P5 คือระดับที่มี stride 2, 4, 8, 16, 32 (1 เซลล์ = กี่พิกเซลของภาพ)</li>
+    <li>receptive field โตขึ้น (K − 1) × stride ต่อ Conv หนึ่งชั้น จาก 3 พิกเซลในชั้นแรก เป็น 63 ที่ P3, 207 ที่ P4, 495 ที่ P5 และทั้งภาพตั้งแต่ SPPF</li>
+    <li>feature เรียงขั้นจากขอบและสี → ลวดลายและส่วนประกอบ → บริเวณของวัตถุ โดยเกิดขึ้นเองจากการเทรน</li>
+    <li>max pooling เลือกค่ามากสุดในหน้าต่างโดยไม่มี weight · YOLO11 ใช้เฉพาะใน SPPF (kernel 5, stride 1 ซ้อน 3 ครั้ง)</li>
+    <li>BatchNorm ปรับแต่ละช่องให้มีค่าเฉลี่ย 0 ส่วนเบี่ยงเบน 1 (คิดจากทุกภาพและทุกตำแหน่งใน batch) แล้วยืด/เลื่อนด้วย γ, β</li>
+    <li>residual (y = x + F(x)) ทำให้ความชันมีฐาน 1 gradient จึงไหลถึงชั้นต้นได้ · CSP/C3k2 แบ่งช่องสองทาง ทางหนึ่งข้ามไป แล้วต่อกลับด้วย concat</li>
+  </ul>
+
+  <!-- ===================== 7. แบบทดสอบ ===================== -->
+  <h2>แบบทดสอบท้ายบท</h2>
+  <p class="small muted">กดเลือกคำตอบเพื่อดูเฉลยและคำอธิบายทันที</p>
+  <div id="quiz"></div>
+
+  <!-- ===================== 8. อ้างอิง ===================== -->
+  <h2>เอกสารอ้างอิง</h2>
+  <ul class="refs">
+    <li>Goodfellow, I., Bengio, Y., &amp; Courville, A. (2016). <em>Deep learning</em>. MIT Press. https://www.deeplearningbook.org</li>
+    <li>He, K., Zhang, X., Ren, S., &amp; Sun, J. (2015). Spatial pyramid pooling in deep convolutional networks for visual recognition. <em>IEEE Transactions on Pattern Analysis and Machine Intelligence, 37</em>(9), 1904–1916. https://doi.org/10.1109/TPAMI.2015.2389824</li>
+    <li>He, K., Zhang, X., Ren, S., &amp; Sun, J. (2016). Deep residual learning for image recognition. In <em>Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition</em> (pp. 770–778). https://doi.org/10.1109/CVPR.2016.90</li>
+    <li>Ioffe, S., &amp; Szegedy, C. (2015). Batch normalization: Accelerating deep network training by reducing internal covariate shift. In <em>Proceedings of the 32nd International Conference on Machine Learning</em> (pp. 448–456). PMLR. https://proceedings.mlr.press/v37/ioffe15.html</li>
+    <li>Jocher, G., &amp; Qiu, J. (2024). <em>Ultralytics YOLO11</em> [Computer software]. Ultralytics. https://github.com/ultralytics/ultralytics</li>
+    <li>Stanford University. (n.d.). <em>CS231n: Deep learning for computer vision</em> [Course notes]. https://cs231n.github.io</li>
+    <li>Wang, C.-Y., Liao, H.-Y. M., Wu, Y.-H., Chen, P.-Y., Hsieh, J.-W., &amp; Yeh, I.-H. (2020). CSPNet: A new backbone that can enhance learning capability of CNN. In <em>Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops</em> (pp. 390–391). https://doi.org/10.1109/CVPRW50498.2020.00203</li>
+  </ul>
+
+  <footer>
+    ข้อเท็จจริงของ YOLO11 ในบทนี้ตรวจกับ <strong>ultralytics 8.4.2</strong>: อ่าน source <code>cfg/models/11/yolo11-seg.yaml</code>, <code>nn/modules/block.py</code> (C2f, C3k2, C3k, Bottleneck, SPPF, C2PSA), <code>nn/tasks.py</code> (parse_model)
+    และรัน <code>tools/extract_shapes.py</code> → <code>data/yolo11-seg_shapes.json</code> (shape และพารามิเตอร์ทุกชั้นทั้ง 5 รุ่น, receptive field ที่วัดด้วย gradient, โครงสร้าง C3k2) และ <code>data/ch6_maps/</code> (feature map จริงของภาพผลไม้)
+    · <a href="../chapter5/">← บทที่ 5</a> · <a href="../">สารบัญ</a> · บทถัดไป: Bounding Box, IoU และ NMS (ยังไม่สร้าง)
+  </footer>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="../assets/common.js"></script>
+<script src="../assets/tensor3d.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const fmtInt = v => Math.round(v).toLocaleString('en-US');
+const SHAPES = fetch('../data/yolo11-seg_shapes.json').then(r => r.json());
+const PLEVEL = { 0: 'P1/2', 1: 'P2/4', 2: 'P2/4', 3: 'P3/8', 4: 'P3/8', 5: 'P4/16', 6: 'P4/16', 7: 'P5/32', 8: 'P5/32', 9: 'P5/32', 10: 'P5/32' };
+const PCOL = { P1: '#c9a227', P2: '#7a9a3a', P3: '#2f9e8a', P4: '#3b6fd6', P5: '#8a4fc4' };
+const pOf = k => PLEVEL[k].split('/')[0];
+const mapURL = (k, n) => `../data/ch6_maps/L${k}_${n}.png`;
+// ภาพผลไม้ 1280×720 หลัง letterbox 640×640 (ชุดเดียวกับที่ใช้คำนวณ feature map ใน tools/extract_shapes.py)
+function fruitInput() {
+  const lb = letterbox(1280, 720, 'square'), c = document.createElement('canvas'); c.width = 640; c.height = 640;
+  const x = c.getContext('2d'); x.fillStyle = 'rgb(114,114,114)'; x.fillRect(0, 0, 640, 640);
+  x.drawImage(makeFruitImage(lb.newW, lb.newH), lb.left, lb.top); return c;
+}
+const FRUIT = fruitInput();
+function tex(T, src, onload) {
+  const t = typeof src === 'string' ? new T.TextureLoader().load(src, onload) : new T.CanvasTexture(src);
+  t.magFilter = T.NearestFilter; return t;
+}
+
+/* ---------- ตาราง P1–P5 และตาราง receptive field ---------- */
+const RF_RULE = {
+  0: ['Conv 3×3 s2', '1 + 2·1 = 3'], 1: ['Conv 3×3 s2', '+ 2·2'], 2: ['Bottleneck: Conv 3×3 สองตัว', '+ 2·4 + 2·4'],
+  3: ['Conv 3×3 s2', '+ 2·4'], 4: ['Bottleneck: Conv 3×3 สองตัว', '+ 2·8 × 2'], 5: ['Conv 3×3 s2', '+ 2·8'],
+  6: ['C3k: Bottleneck 2 ตัว = Conv 3×3 สี่ตัว', '+ 2·16 × 4'], 7: ['Conv 3×3 s2', '+ 2·16'], 8: ['C3k: Conv 3×3 สี่ตัว', '+ 2·32 × 4'],
+  9: ['MaxPool 5×5 สามครั้ง', '+ 4·32 × 3'], 10: ['attention (ทุกเซลล์มองทุกเซลล์)', 'ทั้งภาพ'],
+};
+SHAPES.then(d => {
+  const L = d.scales.n.layers;
+  const lv = [['P1', 2, '0'], ['P2', 4, '1–2'], ['P3', 8, '3–4'], ['P4', 16, '5–6'], ['P5', 32, '7–10']];
+  const last = { P1: 0, P2: 2, P3: 4, P4: 6, P5: 10 };
+  $('ptab').insertAdjacentHTML('beforeend', lv.map(([p, s, ls]) => { const o = L[last[p]].out;
+    return `<tr><td><b style="color:${PCOL[p]}">${p}/${s}</b></td><td>${s}</td><td>${ls}</td><td>${o[2]} × ${o[3]}</td><td>${o[1]}</td></tr>`; }).join(''));
+  let rf = 1; const rows = [];
+  d.rf_n.forEach(r => {
+    const k = r.layer, inc = { 0: 2, 1: 4, 2: 16, 3: 8, 4: 32, 5: 16, 6: 128, 7: 32, 8: 256, 9: 384 }[k];
+    rf = k === 10 ? rf : rf + inc;
+    const formula = k === 10 ? 'ทั้งภาพ' : rf >= 640 ? `${rf} > 640 → ทั้งภาพ` : String(rf);
+    rows.push(`<tr><td>${k}</td><td>${L[k].type}</td><td>${RF_RULE[k][0]} (${RF_RULE[k][1]})</td><td>${formula}</td><td><b>${r.size >= 640 ? '640 (ทั้งภาพ)' : r.size}</b></td></tr>`);
+  });
+  $('rftab').insertAdjacentHTML('beforeend', rows.join(''));
+});
+
+/* =========================================================
+   ซิม 6.1 หอคอย feature
+   ========================================================= */
+(function () {
+  const root = $('s61'), S3 = new Scene3D($('s61_3d'), { views: { iso: [-0.55, 1.12], front: [0, Math.PI / 2], top: [0, 0.1] } });
+  S3.bindButtons(root);
+  let D = null, scale = 'n', sz = 'lin', sel = 4, blocks = [];
+  const dims = (H, C) => sz === 'lin' ? [H / 80, C / 32] : [0.8 + Math.log2(H / 20) * 0.75, 0.3 + Math.log2(C) * 0.55];
+  function build() {
+    if (!S3.ok || !D) return;
+    S3.clear(); blocks = [];
+    const T = S3.T, layers = D.scales[scale].layers.slice(0, 11), items = [{ k: -1, H: 640, C: 3 }, ...layers.map(r => ({ k: r.i, H: r.out[2], C: r.out[1] }))];
+    let x = 0, maxD = 0, maxH = 0;
+    const labs = [];
+    items.forEach((it, idx) => {
+      const [s, dz] = dims(it.H, it.C), side = it.k < 0 ? '#bbbbbb' : PCOL[pOf(it.k)];
+      const face = it.k < 0 ? tex(T, FRUIT) : scale === 'n' ? tex(T, mapURL(it.k, 'mean'), () => S3.render()) : null;
+      const mats = [0, 1, 2, 3, 4, 5].map(f => (f === 4 && face ? new T.MeshBasicMaterial({ map: face }) : new T.MeshLambertMaterial({ color: side })));
+      const m = S3.add(new T.Mesh(new T.BoxGeometry(s, s, Math.max(dz, 0.04)), mats));
+      x += (idx ? s / 2 : 0); m.position.set(x, 0, -Math.max(dz, 0.04) / 2); m.userData.k = it.k;
+      const edge = S3.add(new T.LineSegments(new T.EdgesGeometry(m.geometry), new T.LineBasicMaterial({ color: it.k === sel ? 0xff00aa : 0x666666 })));
+      edge.position.copy(m.position); m.userData.edge = edge;
+      blocks.push(m);
+      labs.push({ pos: [x, s / 2 + 0.35, 0], text: it.k < 0 ? `ภาพ 3×640²` : `${it.k}`, color: it.k < 0 ? '#555' : PCOL[pOf(it.k)] });
+      maxD = Math.max(maxD, dz); maxH = Math.max(maxH, s);
+      x += s / 2 + (sz === 'lin' ? 0.9 : 0.7);
+    });
+    S3.setLabels(labs);
+    S3.pickables = blocks;
+    S3.onPick = hit => { if (hit && hit.object.userData.k !== undefined && hit.object.userData.k >= 0) { sel = hit.object.userData.k; paint(); info(); } };
+    S3.setBounds([-maxH / 2, -maxH / 2, -maxD], [x, maxH / 2 + 0.6, 0]);
+    paint();
+  }
+  function paint() { blocks.forEach(m => m.userData.edge.material.color.set(m.userData.k === sel ? 0xff00aa : 0x666666)); S3.render(); }
+  function info() {
+    if (!D) return;
+    const r = D.scales[scale].layers[sel], o = r.out, rf = D.rf_n[sel], p = pOf(sel);
+    root.querySelectorAll('[data-sc]').forEach(b => b.classList.toggle('on', b.dataset.sc === scale));
+    root.querySelectorAll('[data-sz]').forEach(b => b.classList.toggle('on', b.dataset.sz === sz));
+    $('s61_out').innerHTML =
+      `<b>ชั้น ${sel}: ${r.type}</b> · ระดับ <b style="color:${PCOL[p]}">${PLEVEL[sel]}</b> · เอาต์พุต (${o.join(', ')}) = ${fmtInt(o[1] * o[2] * o[3])} ตัวเลข · พารามิเตอร์ของชั้นนี้ ${fmtInt(r.params)} ตัว (รุ่น ${scale})<br>` +
+      `1 เซลล์ = ${640 / o[2]} × ${640 / o[2]} พิกเซลของภาพ · receptive field ของเซลล์กลางภาพ (รุ่น n) = ${rf.size >= 640 ? 'ทั้งภาพ' : rf.size + ' × ' + rf.size + ' พิกเซล'}` +
+      (scale !== 'n' ? '<br><span class="muted">ภาพ feature map มีเฉพาะรุ่น n (คำนวณจาก yolo11n-seg.pt) รุ่นอื่นแสดงเฉพาะขนาด</span>' : '');
+    $('s61_maps').innerHTML = scale !== 'n' ? '' :
+      `<figure><img src="${mapURL(sel, 'mean')}" alt=""><figcaption>เฉลี่ยทุกช่อง</figcaption></figure>` +
+      [0, 1, 2, 3].map(j => `<figure><img src="${mapURL(sel, 'top' + j)}" alt=""><figcaption>ช่องที่ ${D.maps ? D.maps[sel].top_channels[j] : ''}</figcaption></figure>`).join('');
+  }
+  root.querySelectorAll('[data-sz]').forEach(b => b.addEventListener('click', () => { sz = b.dataset.sz; build(); info(); }));
+  root.querySelector('[data-act=reset]').addEventListener('click', () => { scale = 'n'; sz = 'lin'; sel = 4; S3.view.zoom = 1; S3.setView('iso'); build(); info(); });
+  Promise.all([SHAPES, fetch('../data/ch6_maps/index.json').then(r => r.json())]).then(([d, mi]) => {
+    D = d; D.maps = mi.maps;
+    $('s61_scale').innerHTML = 'nsmlx'.split('').map(s => `<button data-sc="${s}">${s}</button>`).join('');
+    root.querySelectorAll('[data-sc]').forEach(b => b.addEventListener('click', () => { scale = b.dataset.sc; build(); info(); }));
+    build(); info();
+  }).catch(() => { $('s61_out').innerHTML = '⚠ โหลดข้อมูลไม่ได้ ต้องเปิดผ่าน <code>python -m http.server 8000</code>'; });
+})();
+
+/* =========================================================
+   ซิม 6.2 receptive field 3 มิติ
+   ========================================================= */
+(function () {
+  const root = $('s62'), S3 = new Scene3D($('s62_3d'), { views: { iso: [-0.6, 1.12], front: [0, Math.PI / 2 - 0.08], top: [0, 0.05] }, heights: [380, 440] });
+  S3.bindButtons(root);
+  const LAYERS = [0, 1, 4, 6, 8, 10], SIZE = 8, P = {};
+  let D = null, sel = { k: 4, i: 40, j: 30 };
+  const yOf = n => n * ($('s62_gap').checked ? 2.2 : 1.1);   // ความสูงของแผ่นลำดับที่ n (อินพุต = 0)
+  const toW = px => px / 640 * SIZE - SIZE / 2;               // พิกัดพิกเซล → พิกัดโลก
+  function build() {
+    if (!S3.ok || !D) return;
+    S3.clear();
+    const T = S3.T, plane = new T.PlaneGeometry(SIZE, SIZE); plane.rotateX(-Math.PI / 2); plane.userData.shared = true;
+    P.planes = [];
+    const mk = (src, op) => new T.MeshBasicMaterial({ map: tex(T, src, () => S3.render()), side: T.DoubleSide, transparent: op < 1, opacity: op });
+    const base = S3.add(new T.Mesh(plane, mk(FRUIT, 1))); base.position.y = 0; base.userData.k = -1;
+    LAYERS.forEach((k, n) => {
+      const m = S3.add(new T.Mesh(plane, mk(mapURL(k, 'mean'), 0.92))); m.position.y = yOf(n + 1); m.userData.k = k; P.planes.push(m);
+      const H = D.scales.n.layers[k].out[2];
+      if (H <= 80) {   // เส้นตารางของแผ่นที่เซลล์ใหญ่พอจะเห็น
+        const pts = [];
+        for (let a = 0; a <= H; a++) { const v = a / H * SIZE - SIZE / 2; pts.push(new T.Vector3(v, 0.01, -SIZE / 2), new T.Vector3(v, 0.01, SIZE / 2), new T.Vector3(-SIZE / 2, 0.01, v), new T.Vector3(SIZE / 2, 0.01, v)); }
+        const g = new T.LineSegments(new T.BufferGeometry().setFromPoints(pts), new T.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: H > 40 ? 0.25 : 0.45 }));
+        m.add(g);
+      }
+    });
+    P.cell = S3.add(new T.LineSegments(new T.EdgesGeometry(new T.BoxGeometry(1, 0.02, 1)), new T.LineBasicMaterial({ color: 0xff00aa })));
+    P.rf = S3.add(new T.LineSegments(new T.EdgesGeometry(new T.BoxGeometry(1, 0.02, 1)), new T.LineBasicMaterial({ color: 0xff00aa })));
+    P.rfFill = S3.add(new T.Mesh(new T.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), new T.MeshBasicMaterial({ color: 0xff00aa, transparent: true, opacity: 0.25, depthWrite: false, side: T.DoubleSide })));
+    P.cone = [0, 1, 2, 3].map(() => S3.line([[0, 0, 0], [0, 0, 0]], 0xff00aa));
+    // วาดหลังแผ่นโปร่งใสทุกแผ่น (ต้องอยู่ในกลุ่ม transparent ด้วย) และไม่ถูกบัง
+    [P.cell, P.rf, ...P.cone].forEach(o => { o.material.depthTest = false; o.material.transparent = true; o.renderOrder = 20; });
+    P.rfFill.material.depthTest = false; P.rfFill.renderOrder = 19;
+    S3.pickables = P.planes;
+    S3.onPick = hit => {
+      if (!hit || hit.object.userData.k === undefined) return;
+      const k = hit.object.userData.k, H = D.scales.n.layers[k].out[2];
+      const j = Math.floor((hit.point.x + SIZE / 2) / SIZE * H), i = Math.floor((hit.point.z + SIZE / 2) / SIZE * H);
+      sel = { k, i: Math.max(0, Math.min(H - 1, i)), j: Math.max(0, Math.min(H - 1, j)) }; update();
+    };
+    S3.setLabels([{ pos: [-SIZE / 2 - 0.3, 0, SIZE / 2], text: 'ภาพอินพุต 640 × 640', color: '#555' },
+                  ...LAYERS.map((k, n) => ({ pos: [-SIZE / 2 - 0.3, yOf(n + 1), SIZE / 2], text: `ชั้น ${k} · ${PLEVEL[k]} · ${D.scales.n.layers[k].out[2]}²`, color: PCOL[pOf(k)] }))]);
+    S3.setBounds([-SIZE / 2 - 2, 0, -SIZE / 2], [SIZE / 2, yOf(LAYERS.length) + 0.5, SIZE / 2]);
+    update();
+  }
+  function rfBox(k, i, j) {   // ช่วงพิกเซลที่เซลล์ (i, j) มองเห็น (ตัดที่ขอบภาพ)
+    const s = 640 / D.scales.n.layers[k].out[2], R = D.rf_n[k].size, h = (R - 1) / 2;
+    // ชั้น 10 (C2PSA) มี attention: ทุกเซลล์มองเห็นทุกตำแหน่ง จึงเห็นทั้งภาพเสมอ
+    if (k === 10) return { y0: 0, y1: 639, x0: 0, x1: 639, R: 640, s, global: true };
+    const cl = v => Math.max(0, Math.min(639, Math.round(v)));
+    return { y0: cl(i * s - h), y1: cl(i * s + h), x0: cl(j * s - h), x1: cl(j * s + h), R, s };
+  }
+  function update() {
+    if (!S3.ok || !P.cell || !D) return;
+    const { k, i, j } = sel, n = LAYERS.indexOf(k) + 1, H = D.scales.n.layers[k].out[2], cs = SIZE / H, y = yOf(n);
+    const cx = (j + 0.5) * cs - SIZE / 2, cz = (i + 0.5) * cs - SIZE / 2;
+    P.cell.scale.set(cs, 1, cs); P.cell.position.set(cx, y + 0.02, cz);
+    P.planes.forEach((m, q) => { m.material.opacity = q + 1 > n ? 0.22 : 0.92; });
+    const b = rfBox(k, i, j), x0 = toW(b.x0), x1 = toW(b.x1 + 1), z0 = toW(b.y0), z1 = toW(b.y1 + 1);
+    P.rf.scale.set(x1 - x0, 1, z1 - z0); P.rf.position.set((x0 + x1) / 2, 0.02, (z0 + z1) / 2);
+    P.rfFill.scale.set(x1 - x0, 1, z1 - z0); P.rfFill.position.set((x0 + x1) / 2, 0.015, (z0 + z1) / 2);
+    const top = [[cx - cs / 2, cz - cs / 2], [cx + cs / 2, cz - cs / 2], [cx + cs / 2, cz + cs / 2], [cx - cs / 2, cz + cs / 2]];
+    const bot = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
+    P.cone.forEach((l, q) => S3.setLine(l, [[top[q][0], y, top[q][1]], [bot[q][0], 0.02, bot[q][1]]]));
+    S3.render();
+    const w = b.x1 - b.x0 + 1, h = b.y1 - b.y0 + 1;
+    $('s62_out').innerHTML =
+      `เลือกเซลล์ (แถว ${i}, คอลัมน์ ${j}) ของ <b style="color:${PCOL[pOf(k)]}">ชั้น ${k} (${PLEVEL[k]}, ${H} × ${H})</b> · 1 เซลล์ = ${b.s} × ${b.s} พิกเซล<br>` +
+      `receptive field = ${b.global ? '<b>ทั้งภาพ</b> (attention ทำให้ทุกเซลล์มองเห็นทุกตำแหน่ง)' : `<b>${b.R} × ${b.R}</b> พิกเซล`} → บนภาพนี้เห็นบริเวณแถว ${b.y0}–${b.y1}, คอลัมน์ ${b.x0}–${b.x1} (${w} × ${h} พิกเซล${w < b.R || h < b.R ? ' ถูกตัดที่ขอบภาพ' : ''}) = ${(w * h / 640 / 640 * 100).toFixed(1)}% ของภาพ`;
+  }
+  $('s62_gap').addEventListener('change', build);
+  root.querySelector('[data-act=reset]').addEventListener('click', () => { sel = { k: 4, i: 40, j: 30 }; S3.view.zoom = 1; S3.setView('iso'); build(); });
+  SHAPES.then(d => { D = d; build(); });
+})();
+
+/* =========================================================
+   ซิม 6.3 max pooling
+   ========================================================= */
+(function () {
+  const root = $('s63');
+  let st;
+  function gen(seed) { const r = rng(seed); return Array.from({ length: 16 }, () => Math.floor(r() * 10)); }
+  function win(w) { const r0 = Math.floor(w / 2) * 2, c0 = (w % 2) * 2; return [r0 * 4 + c0, r0 * 4 + c0 + 1, (r0 + 1) * 4 + c0, (r0 + 1) * 4 + c0 + 1]; }
+  function res(w) { const v = win(w).map(i => st.a[i]); return st.mode === 'max' ? Math.max(...v) : v.reduce((s, x) => s + x, 0) / 4; }
+  function draw() {
+    const cur = st.done ? win(st.done - 1) : [], best = st.done && st.mode === 'max' ? cur.find(i => st.a[i] === res(st.done - 1)) : -1;
+    $('s63_in').innerHTML = st.a.map((v, i) => `<div class="${cur.includes(i) ? 'win' : ''} ${i === best ? 'best' : ''}" style="background:rgb(${255 - v * 18},${255 - v * 12},255)">${v}</div>`).join('');
+    $('s63_out').innerHTML = [0, 1, 2, 3].map(w => `<div class="${w === st.done - 1 ? 'win' : ''}" style="background:${w < st.done ? '#fdf6e3' : '#f7f7f7'}">${w < st.done ? +res(w).toFixed(2) : ''}</div>`).join('');
+    let t = st.done ? `หน้าต่างที่ ${st.done}: [${cur.map(i => st.a[i]).join(', ')}] → ${st.mode === 'max' ? 'ค่ามากที่สุด' : 'ค่าเฉลี่ย'} = <b>${+res(st.done - 1).toFixed(2)}</b>` : 'กด "ก้าวถัดไป"';
+    if (st.done === 4) t += '<br>✅ ครบ 4 หน้าต่าง: 4 × 4 = 16 ค่า → 2 × 2 = 4 ค่า';
+    $('s63_txt').innerHTML = t;
+    root.querySelectorAll('[data-pool]').forEach(b => b.classList.toggle('on', b.dataset.pool === st.mode));
+  }
+  $('s63_step').addEventListener('click', () => { st.done = st.done >= 4 ? 1 : st.done + 1; draw(); });
+  $('s63_all').addEventListener('click', () => { st.done = 4; draw(); });
+  $('s63_new').addEventListener('click', () => { st.seed++; st.a = gen(st.seed); st.done = 0; draw(); });
+  root.querySelectorAll('[data-pool]').forEach(b => b.addEventListener('click', () => { st.mode = b.dataset.pool; draw(); }));
+  const reset = () => { st = { seed: 5, a: gen(5), mode: 'max', done: 0 }; draw(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 6.4 BatchNorm 3 มิติ
+   ========================================================= */
+(function () {
+  const root = $('s64'), S3 = new Scene3D($('s64_3d'), { views: { iso: [-0.5, 1.05] }, heights: [300, 360] });
+  S3.bindButtons(root);
+  const N = 4, C = 3, H = 4, W = 4, GAPX = 2, GAPZ = 2.2;
+  const MU = [8, -3, 40], SD = [3, 0.5, 15], COLS = ['#d6453d', '#2f9e55', '#3b6fd6'];
+  const r = rng(42), gauss = () => { let u = 0; while (!u) u = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r()); };
+  const X = Array.from({ length: N * C * H * W }, (_, q) => { const c = Math.floor(q / (H * W)) % C; return MU[c] + SD[c] * gauss(); });
+  const id = (n, c, y, x) => ((n * C + c) * H + y) * W + x;
+  const stats = c => { const v = []; for (let n = 0; n < N; n++) for (let q = 0; q < H * W; q++) v.push(X[(n * C + c) * H * W + q]); const m = v.reduce((a, b) => a + b, 0) / v.length; return { m, v: v.reduce((a, b) => a + (b - m) ** 2, 0) / v.length, n: v.length }; };
+  const ST = [0, 1, 2].map(stats);
+  let st, mesh = null, anim = null;
+  const out = (q, t) => { const c = Math.floor(q / (H * W)) % C, s = ST[c], y = st.g[c] * (X[q] - s.m) / Math.sqrt(s.v + 1e-5) + st.b[c]; return X[q] + (y - X[q]) * t; };
+  function build() {
+    if (!S3.ok) return;
+    S3.clear(); mesh = S3.boxes(N * C * H * W, 0.8); S3.pickables = [mesh];
+    S3.onPick = hit => { if (hit && hit.instanceId !== undefined) { st.c = Math.floor(hit.instanceId / (H * W)) % C; sync(); paint(); } };
+    S3.setLabels([...Array.from({ length: N }, (_, n) => ({ pos: [n * (W + GAPX) + (W - 1) / 2, 2.6, 0], text: `ภาพ ${n + 1}`, color: '#555' })),
+                  ...[0, 1, 2].map(c => ({ pos: [N * (W + GAPX) - GAPX + 0.8, 0, -c * GAPZ], text: `ช่อง ${c}`, color: COLS[c] }))]);
+    S3.setBounds([-0.5, -1.6, -(C - 1) * GAPZ - 1.5], [N * (W + GAPX) - GAPX + 1.5, 4.5, 0.5]);
+    paint();
+  }
+  function paint() {
+    drawHist(); text();
+    if (!S3.ok || !mesh) return;
+    const T = S3.T, col = new T.Color(), white = new T.Color(0xffffff), M4 = new T.Matrix4(), hs = 0.06 + 0.39 * st.t;   // ก่อน BN ค่าใหญ่มาก จึงย่อความสูงลง
+    for (let n = 0; n < N; n++) for (let c = 0; c < C; c++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const q = id(n, c, y, x), v = out(q, st.t), h = Math.max(0.06, Math.abs(v) * hs);
+      M4.makeScale(1, h / 0.8, 0.5); M4.setPosition(n * (W + GAPX) + x, (v >= 0 ? h / 2 : -h / 2), -c * GAPZ - y * 0.45);
+      mesh.setMatrixAt(q, M4);
+      const t = Math.min(1, Math.abs(v) / 3); col.set(v >= 0 ? '#d6453d' : '#3b6fd6').lerp(white, 1 - (0.3 + 0.7 * t));
+      if (c !== st.c) col.lerp(white, 0.7);
+      mesh.setColorAt(q, col);
+    }
+    mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    S3.render();
+  }
+  function drawHist() {
+    const { ctx, W: CW, H: CH } = setupCanvas($('s64_hist'));
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, CW, CH);
+    const vals = X.map((_, q) => out(q, st.t)), lo = Math.min(...vals, -3), hi = Math.max(...vals, 3);
+    const sx = v => 40 + (v - lo) / (hi - lo) * (CW - 60);
+    ctx.strokeStyle = '#999'; ctx.beginPath(); ctx.moveTo(40, CH - 20); ctx.lineTo(CW - 20, CH - 20); ctx.stroke();
+    ctx.fillStyle = '#666'; ctx.font = '11px Sarabun, sans-serif'; ctx.textAlign = 'center';
+    [lo, 0, hi].forEach(v => ctx.fillText(v.toFixed(1), sx(v), CH - 6));
+    ctx.textAlign = 'left';
+    for (let c = 0; c < C; c++) {
+      const y = 14 + c * 30;
+      ctx.fillStyle = COLS[c]; ctx.fillText(`ช่อง ${c}`, 2, y + 4);
+      for (let n = 0; n < N; n++) for (let q = 0; q < H * W; q++) {
+        const v = vals[(n * C + c) * H * W + q]; ctx.globalAlpha = c === st.c ? 0.75 : 0.3;
+        ctx.beginPath(); ctx.arc(sx(v), y, 3, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+  function text() {
+    const c = st.c, s = ST[c];
+    const now = [0, 1, 2].map(k => { const v = []; for (let n = 0; n < N; n++) for (let q = 0; q < H * W; q++) v.push(out((n * C + k) * H * W + q, st.t));
+      const m = v.reduce((a, b) => a + b, 0) / v.length; return { m, sd: Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / v.length) }; });
+    $('s64_out').innerHTML =
+      `<b style="color:${COLS[c]}">ช่อง ${c}</b>: คิด μ และ σ² จาก ${N} ภาพ × ${H * W} ตำแหน่ง = <b>${s.n}</b> ตัวเลข (ลูกบาศก์สีเข้มทั้งหมดในฉาก) → μ = ${s.m.toFixed(2)}, σ = ${Math.sqrt(s.v).toFixed(2)}<br>` +
+      `ตอนนี้ (${st.t > 0.5 ? 'หลัง BatchNorm' : 'ก่อน BatchNorm'}): ` + now.map((o, k) => `<span style="color:${COLS[k]}">ช่อง ${k} เฉลี่ย ${o.m.toFixed(2)} ส่วนเบี่ยงเบน ${o.sd.toFixed(2)}</span>`).join(' · ') +
+      `<br><span class="muted">BatchNorm มีพารามิเตอร์ที่เรียนรู้ได้แค่ γ และ β ช่องละ 1 คู่ (3 ช่อง = 6 ตัว)</span>`;
+  }
+  function sync() {
+    root.querySelectorAll('[data-bc]').forEach(b => b.classList.toggle('on', +b.dataset.bc === st.c));
+    $('s64_g').value = st.g[st.c]; $('s64_b').value = st.b[st.c];
+    $('s64_gv').textContent = st.g[st.c].toFixed(1); $('s64_bv').textContent = st.b[st.c].toFixed(1);
+    $('s64_bn').textContent = st.t > 0.5 ? '◀ ย้อนเป็นก่อน BatchNorm' : '▶ ทำ BatchNorm';
+  }
+  function morph(to) {
+    if (anim) cancelAnimationFrame(anim);
+    const t0 = st.t, start = performance.now();
+    const go = now => { const k = Math.min(1, (now - start) / 800); st.t = t0 + (to - t0) * k; paint(); sync(); anim = k < 1 ? requestAnimationFrame(go) : null; };
+    anim = requestAnimationFrame(go);
+  }
+  root.querySelectorAll('[data-bc]').forEach(b => b.addEventListener('click', () => { st.c = +b.dataset.bc; sync(); paint(); }));
+  $('s64_bn').addEventListener('click', () => morph(st.t > 0.5 ? 0 : 1));
+  $('s64_g').addEventListener('input', e => { st.g[st.c] = +e.target.value; if (st.t < 0.5) morph(1); sync(); paint(); });
+  $('s64_b').addEventListener('input', e => { st.b[st.c] = +e.target.value; if (st.t < 0.5) morph(1); sync(); paint(); });
+  const reset = () => { if (anim) cancelAnimationFrame(anim); st = { c: 2, t: 0, g: [1, 1, 1], b: [0, 0, 0] }; S3.view.zoom = 1; S3.setView('iso'); sync(); build(); if (!S3.ok) paint(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 6.5 residual กับ gradient
+   ========================================================= */
+// เครือข่ายของเล่น: แต่ละบล็อกมีตัวเลขตัวเดียว F(x) = w2 · SiLU(w1 · x)
+function chainGrad(ws, residual) {
+  const silu = z => z / (1 + Math.exp(-z)), dsilu = z => { const s = 1 / (1 + Math.exp(-z)); return s * (1 + z * (1 - s)); };
+  const xs = [1], J = [];
+  ws.forEach(([w1, w2]) => { const x = xs[xs.length - 1], f = w2 * silu(w1 * x), d = w2 * w1 * dsilu(w1 * x); xs.push(residual ? x + f : f); J.push(residual ? 1 + d : d); });
+  // gradient ของ L = เอาต์พุตสุดท้าย เทียบกับอินพุตของแต่ละบล็อก (กฎลูกโซ่ ย้อนจากท้าย)
+  const g = new Array(ws.length); let acc = 1;
+  for (let k = ws.length - 1; k >= 0; k--) { acc *= J[k]; g[k] = acc; }
+  return { xs, g };
+}
+(function () {
+  const root = $('s65');
+  let st;
+  const weights = (seed, n) => { const r = rng(seed), gs = () => { let u = 0; while (!u) u = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r()); };
+    return Array.from({ length: n }, () => [0.9 * gs(), 0.6 * gs()]); };
+  function draw() {
+    const ws = weights(st.seed, st.n), A = chainGrad(ws, false), B = chainGrad(ws, true);
+    const { ctx, W, H } = setupCanvas($('s65_cv'));
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    const L = 50, R = 10, T = 16, Bm = 34, lo = -12, hi = 2;
+    const sy = v => T + (hi - Math.max(lo, Math.min(hi, Math.log10(Math.abs(v) + 1e-30)))) / (hi - lo) * (H - T - Bm);
+    ctx.strokeStyle = '#eee'; ctx.fillStyle = '#666'; ctx.font = '10px Consolas, monospace'; ctx.textAlign = 'right';
+    for (let e = lo; e <= hi; e += 2) { ctx.beginPath(); ctx.moveTo(L, sy(10 ** e)); ctx.lineTo(W - R, sy(10 ** e)); ctx.stroke(); ctx.fillText(`1e${e}`, L - 4, sy(10 ** e) + 3); }
+    const bw = (W - L - R) / st.n;
+    for (let k = 0; k < st.n; k++) {
+      const x = L + k * bw;
+      ctx.fillStyle = '#b0aaa0'; ctx.fillRect(x + bw * 0.08, sy(A.g[k]), bw * 0.4, H - Bm - sy(A.g[k]));
+      ctx.fillStyle = '#3b6fd6'; ctx.fillRect(x + bw * 0.5, sy(B.g[k]), bw * 0.4, H - Bm - sy(B.g[k]));
+    }
+    ctx.fillStyle = '#666'; ctx.textAlign = 'center'; ctx.font = '11px Sarabun, sans-serif';
+    ctx.fillText('บล็อกที่ 1 (ต้นสุด)', L + 50, H - 18); ctx.fillText(`บล็อกที่ ${st.n} (ท้ายสุด)`, W - R - 50, H - 18);
+    ctx.fillText('ขนาดของ gradient ที่ไหลกลับมาถึงอินพุตของแต่ละบล็อก (แกนตั้ง log)', W / 2, H - 4);
+    ctx.textAlign = 'left'; ctx.fillStyle = '#8a857c'; ctx.fillText('■ ไม่มีทางลัด', L + 4, 12); ctx.fillStyle = '#3b6fd6'; ctx.fillText('■ มีทางลัด (residual)', L + 100, 12);
+    $('s65_nv').textContent = st.n; $('s65_n').value = st.n;
+    const e = v => Math.abs(v).toExponential(1);
+    $('s65_out').innerHTML =
+      `gradient ที่ไหลถึงบล็อกแรก: ไม่มีทางลัด = <b>${e(A.g[0])}</b> · มีทางลัด = <b style="color:#3b6fd6">${e(B.g[0])}</b> (ต่างกัน ${(Math.abs(B.g[0]) / Math.abs(A.g[0] || 1e-300)).toExponential(1)} เท่า)<br>` +
+      `เอาต์พุตสุดท้ายของเครือข่าย (อินพุต = 1): ไม่มีทางลัด = ${e(A.xs[st.n])} · มีทางลัด = ${e(B.xs[st.n])}<br>` +
+      `<span class="muted">เครือข่ายของเล่น: แต่ละบล็อกมีตัวเลขตัวเดียว F(x) = w₂·SiLU(w₁·x) โดยสุ่ม w₁ ~ N(0, 0.9²), w₂ ~ N(0, 0.6²) · gradient คำนวณด้วยกฎลูกโซ่แบบบทที่ 4</span>`;
+  }
+  $('s65_n').addEventListener('input', e => { st.n = +e.target.value; draw(); });
+  $('s65_new').addEventListener('click', () => { st.seed++; draw(); });
+  const reset = () => { st = { n: 12, seed: 1 }; draw(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 6.6 C3k2 3 มิติ
+   ========================================================= */
+(function () {
+  const root = $('s66'), S3 = new Scene3D($('s66_3d'), { views: { iso: [-0.55, 1.1], front: [0, Math.PI / 2], top: [0, 0.12] } });
+  S3.bindButtons(root);
+  const CA = '#5b8fd1', CB = '#3f9d5a', CY = '#e3892b', CIN = '#b0aaa0', COUT = '#8a4fc4', CV1 = '#c9c3b8';
+  let D = null, L = null, step = 0, objs = [];
+  const STEPS = 6;
+  function block(z0, depth, color, x, y, label) { return { z0, depth, color, x, y, label }; }
+  function build() {
+    if (!S3.ok || !L) return;
+    S3.clear(); objs = [];
+    const T = S3.T, c = L.hidden, dz = ch => ch / 8, F = 1.6;   // ความลึก 8 ช่อง = 1 หน่วย, หน้าตัด 1.6 × 1.6
+    const mk = (b, opacity = 1) => {
+      const m = S3.add(new T.Mesh(new T.BoxGeometry(F, F, Math.max(dz(b.depth), 0.05)), new T.MeshLambertMaterial({ color: b.color, transparent: opacity < 1, opacity })));
+      m.position.set(b.x, b.y, -dz(b.z0) - Math.max(dz(b.depth), 0.05) / 2);
+      const e = S3.add(new T.LineSegments(new T.EdgesGeometry(m.geometry), new T.LineBasicMaterial({ color: 0x555555 }))); e.position.copy(m.position);
+      return [m, e];
+    };
+    const X = [0, 3, 6, 9, 12, 15];
+    // ขั้น: 0 อินพุต, 1 cv1, 2 split, 3 บล็อกภายใน, 4 concat, 5 cv2
+    const parts = [
+      { s: 0, b: block(0, L.c_in, CIN, X[0], 0) },
+      { s: 1, b: block(0, c, CA, X[1], 0) }, { s: 1, b: block(c, c, CB, X[1], 0) },
+      { s: 2, b: block(0, c, CA, X[2], 1.3) }, { s: 2, b: block(0, c, CB, X[2], -1.3) },
+      { s: 3, b: block(0, c, CY, X[3], -1.3) },
+      { s: 4, b: block(0, c, CA, X[4], 0) }, { s: 4, b: block(c, c, CB, X[4], 0) }, { s: 4, b: block(2 * c, c, CY, X[4], 0) },
+      { s: 5, b: block(0, L.c_out, COUT, X[5], 0) },
+    ];
+    parts.forEach(p => { const [m, e] = mk(p.b); objs.push({ s: p.s, m, e }); });
+    // เส้นทางของข้อมูล
+    const ln = (a, b, s, col = 0x999999) => { const l = S3.line([a, b], col); objs.push({ s, m: l }); };
+    ln([X[0] + 0.8, 0, 0.2], [X[1] - 0.8, 0, 0.2], 1);
+    ln([X[1] + 0.8, 0.4, 0.2], [X[2] - 0.8, 1.3, 0.2], 2); ln([X[1] + 0.8, -0.4, 0.2], [X[2] - 0.8, -1.3, 0.2], 2);
+    ln([X[2] + 0.8, -1.3, 0.2], [X[3] - 0.8, -1.3, 0.2], 3);
+    ln([X[2] + 0.8, 1.3, 0.2], [X[4] - 0.8, 0.4, 0.2], 4); ln([X[2] + 0.8, -1.3, 0.4], [X[4] - 0.8, 0, 0.2], 4); ln([X[3] + 0.8, -1.3, 0.2], [X[4] - 0.8, -0.4, 0.2], 4);
+    ln([X[4] + 0.8, 0, 0.2], [X[5] - 0.8, 0, 0.2], 5);
+    if (L.shortcut) { const arc = []; for (let t = 0; t <= 20; t++) arc.push([X[2] + 0.4 + (X[3] - X[2] - 0.8) * t / 20, -1.3 - 1.2 - Math.sin(Math.PI * t / 20) * 0.9, 0.2]); objs.push({ s: 3, m: S3.line(arc, 0xe3892b) }); }
+    const lab = [
+      { pos: [X[0], 1.3, 0], text: `อินพุต ${L.c_in}`, color: '#555', s: 0 }, { pos: [X[1], 1.3, 0], text: `cv1 → ${2 * c}`, color: '#555', s: 1 },
+      { pos: [X[2], 2.6, 0], text: `a: ${c}`, color: CA, s: 2 }, { pos: [X[2], -0.1, 0], text: `b: ${c}`, color: CB, s: 2 },
+      { pos: [X[3], -0.1, 0], text: `${L.block_type} → y: ${c}`, color: CY, s: 3 }, { pos: [X[4], 1.3, 0], text: `concat ${3 * c}`, color: '#555', s: 4 },
+      { pos: [X[5], 1.3, 0], text: `cv2 → ${L.c_out}`, color: COUT, s: 5 },
+    ];
+    objs.labs = lab;
+    const maxD = Math.max(L.c_in, 3 * c, L.c_out) / 8;
+    S3.setBounds([-1, -3.6, -maxD], [X[5] + 1, 2.8, 0.3]);
+    show();
+  }
+  function show() {
+    objs.forEach(o => { o.m.visible = o.s <= step; if (o.e) o.e.visible = o.s <= step; if (o.m.material) { o.m.material.transparent = true; o.m.material.opacity = o.s === step ? 1 : 0.45; } });
+    if (S3.ok && objs.labs) S3.setLabels(objs.labs.filter(l => l.s <= step));
+    S3.render(); text();
+  }
+  function text() {
+    if (!L) return;
+    const c = L.hidden, bn = ch => 2 * ch, cv1 = L.c_in * 2 * c + bn(2 * c), cv2 = L.cv2_in * L.c_out + bn(L.c_out);
+    const mid = L.bottleneck_mid, h = c / 2;
+    // C3k(c, c, n=2): cv1, cv2 = Conv 1×1 (c→c/2), cv3 = Conv 1×1 (c→c), Bottleneck 2 ตัว แต่ละตัว Conv 3×3 (c/2→c/2) สองชั้น
+    const inner = L.block_type === 'Bottleneck' ? (9 * c * mid + bn(mid)) + (9 * mid * c + bn(c))
+                : 2 * (c * h + bn(h)) + (2 * h * c + bn(c)) + 4 * (9 * h * h + bn(h));
+    const innerTxt = L.block_type === 'Bottleneck' ? `Conv 3×3 (${c}→${mid}) ${fmtInt(9 * c * mid + bn(mid))} + Conv 3×3 (${mid}→${c}) ${fmtInt(9 * mid * c + bn(c))} = ${fmtInt(inner)}`
+      : `C3k = Conv 1×1 (${c}→${h}) สองตัว ${fmtInt(2 * (c * h + bn(h)))} + Conv 1×1 (${c}→${c}) ${fmtInt(2 * h * c + bn(c))} + Bottleneck 2 ตัว (Conv 3×3 ${h}→${h} สี่ชั้น) ${fmtInt(4 * (9 * h * h + bn(h)))} = ${fmtInt(inner)}`;
+    const total = cv1 + cv2 + inner;
+    const S = [
+      `<b>ขั้น 0 อินพุต</b>: (${L.c_in}, H, W) จากชั้นก่อนหน้า`,
+      `<b>ขั้น 1 cv1</b>: Conv 1 × 1 จาก ${L.c_in} เป็น 2c = ${2 * c} ช่อง (c = ${c}) · weight 1×1×${L.c_in}×${2 * c} = ${fmtInt(L.c_in * 2 * c)} + BatchNorm ${bn(2 * c)} = ${fmtInt(cv1)}`,
+      `<b>ขั้น 2 chunk(2)</b>: แบ่งตามแกนช่องเป็น a (${c} ช่องแรก, น้ำเงิน) และ b (${c} ช่องหลัง, เขียว) ไม่มีการคำนวณ ไม่มีพารามิเตอร์`,
+      `<b>ขั้น 3 บล็อกภายใน</b>: ก้อน b ผ่าน ${L.block_type} ได้ y (${c} ช่อง, ส้ม)` + (L.shortcut ? ' · เส้นโค้งสีส้มด้านล่างคือทางลัด residual (y = b + F(b))' : '') + ` · ${innerTxt}`,
+      `<b>ขั้น 4 concat</b>: ต่อ a, b, y ตามแกนช่อง = ${c} + ${c} + ${c} = ${3 * c} ช่อง (ก้อนเดียวที่มีสามสี) ไม่มีพารามิเตอร์ · ก้อน a ไม่ผ่านการคำนวณหนักเลย นี่คือส่วน "ข้ามไป" ของ CSP`,
+      `<b>ขั้น 5 cv2</b>: Conv 1 × 1 จาก ${L.cv2_in} เป็น ${L.c_out} ช่อง · weight ${fmtInt(L.cv2_in * L.c_out)} + BatchNorm ${bn(L.c_out)} = ${fmtInt(cv2)}`,
+    ];
+    $('s66_out').innerHTML = S.slice(0, step + 1).map((s, i) => (i === step ? s : `<span class="muted">${s}</span>`)).join('<br>') +
+      (step === STEPS - 1 ? `<br>✅ รวมพารามิเตอร์ = ${fmtInt(cv1)} + ${fmtInt(inner)} + ${fmtInt(cv2)} = <b>${fmtInt(total)}</b> · ของจริงจากโมเดล (ชั้น ${L.i}) = <b>${fmtInt(L.params)}</b>` : '');
+    root.querySelectorAll('[data-li]').forEach(b => b.classList.toggle('on', +b.dataset.li === L.i));
+  }
+  $('s66_next').addEventListener('click', () => { step = Math.min(STEPS - 1, step + 1); show(); });
+  $('s66_prev').addEventListener('click', () => { step = Math.max(0, step - 1); show(); });
+  root.querySelector('[data-act=reset]').addEventListener('click', () => { L = D.list[0]; step = 0; S3.view.zoom = 1; S3.setView('iso'); build(); });
+  SHAPES.then(d => {
+    D = { list: d.c3k2_n.map(c => ({ ...c, params: d.scales.n.layers[c.i].params })) };
+    $('s66_pick').innerHTML = D.list.map(c => `<button data-li="${c.i}">ชั้น ${c.i} (${c.block_type})</button>`).join(' ');
+    root.querySelectorAll('[data-li]').forEach(b => b.addEventListener('click', () => { L = D.list.find(c => c.i === +b.dataset.li); step = STEPS - 1; build(); }));
+    L = D.list[0]; build();
+  });
+})();
+
+/* =========================================================
+   🔗 และแบบทดสอบ
+   ========================================================= */
+renderPipeline($('pipe'), ['backbone']);
+
+initQuiz($('quiz'), [
+  {
+    q: 'ภาพ 640 × 640 ผ่าน Backbone ของ yolo11n-seg แล้วได้ feature map ระดับ P5 ขนาดเท่าใด',
+    options: ['80 × 80', '40 × 40', '20 × 20', '10 × 10'],
+    answer: 2,
+    explain: 'P5 มี stride 32 → 640 / 32 = 20 ซึ่งตรงกับ shape (1, 256, 20, 20) ที่วัดจากโมเดลจริง',
+  },
+  {
+    q: 'ทำไมเมื่อภาพเล็กลง Backbone จึงเพิ่มจำนวนช่อง',
+    options: ['เพื่อให้ไฟล์โมเดลเล็กลง', 'เพราะแต่ละเซลล์ต้องสรุปพื้นที่กว้างและหลากหลายขึ้น จึงต้องมีช่องไว้เก็บลวดลายหลายแบบ', 'เพราะ PyTorch บังคับ', 'เพื่อให้ภาพกลับมาใหญ่เท่าเดิม'],
+    answer: 1,
+    explain: 'ความละเอียดตำแหน่งลดได้ แต่ข้อมูล "มีอะไรอยู่บ้าง" ต้องเพิ่มขึ้น ช่องที่มากขึ้นคือพื้นที่เก็บลวดลายที่ซับซ้อนขึ้น',
+  },
+  {
+    q: 'receptive field ตอนนี้คือ 7 พิกเซล และอยู่ที่ stride 4 ถ้าเพิ่ม Conv 3 × 3 (stride 1) อีกชั้น receptive field จะเป็นเท่าใด',
+    options: ['9', '10', '15', '28'],
+    answer: 2,
+    explain: 'เพิ่ม (K − 1) × stride = 2 × 4 = 8 → 7 + 8 = 15 (stride ของตำแหน่งนั้นสำคัญกว่าขนาด kernel)',
+  },
+  {
+    q: 'max pooling 2 × 2 กับหน้าต่าง [3, 9, 1, 4] ได้ค่าเท่าใด',
+    options: ['4.25', '9', '17', '1'],
+    answer: 1,
+    explain: 'max pooling เลือกค่ามากที่สุด = 9 (ถ้าเป็น average pooling จะได้ 4.25)',
+  },
+  {
+    q: 'BatchNorm ของช่องที่ 5 คำนวณค่าเฉลี่ย μ จากตัวเลขชุดใด',
+    options: ['ทุกช่องของภาพเดียว', 'ค่าในช่องที่ 5 ของทุกภาพใน batch และทุกตำแหน่ง', 'เฉพาะพิกเซลกลางภาพ', 'ค่าในช่องที่ 5 ของภาพแรกเท่านั้น'],
+    answer: 1,
+    explain: 'BatchNorm ทำแยกทีละช่อง โดยรวมค่าในช่องนั้นจากทุกภาพใน batch และทุกตำแหน่ง H × W (ซิม 6.4)',
+  },
+  {
+    q: 'บล็อก residual y = x + F(x) มีความชัน dy/dx เท่าใด และช่วยอะไร',
+    options: ['F′(x) ทำให้เทรนเร็วขึ้น', '1 + F′(x) ทำให้ gradient มีฐาน 1 ไม่หดหายเมื่อซ้อนหลายชั้น', '0 ทำให้ไม่ต้องเทรน', 'x · F′(x)'],
+    answer: 1,
+    explain: 'อนุพันธ์ของ x คือ 1 ความชันรวมจึงเป็น 1 + F′(x) ผลคูณตลอดทางจึงไม่หดจนเป็นศูนย์ (ซิม 6.5)',
+  },
+  {
+    q: 'ในบล็อก C3k2 ชั้น 2 ของ yolo11n-seg ก้อน a (16 ช่อง) ผ่านขั้นตอนใดบ้างหลังจากถูกแบ่ง',
+    options: ['ผ่าน Bottleneck สองรอบ', 'ไม่ผ่านการคำนวณหนักเลย ถูกนำไป concat ตรง ๆ แล้วเข้า cv2', 'ถูกทิ้งไป', 'ผ่าน max pooling'],
+    answer: 1,
+    explain: 'นี่คือหัวใจของ CSP: ส่วนหนึ่งของช่องข้ามบล็อกหนักไปเลย ประหยัดการคำนวณและให้ gradient มีทางไหลตรง',
+  },
+  {
+    q: 'วัตถุเล็ก เช่น องุ่นหนึ่งลูกกว้างราว 20 พิกเซล ควรตรวจจากระดับใดได้ดีที่สุด',
+    options: ['P3/8', 'P5/32', 'P1/2', 'ระดับใดก็ได้เท่ากัน'],
+    answer: 0,
+    explain: 'P3 มีเซลล์ขนาด 8 พิกเซลและ receptive field ราว 63 พิกเซล พอดีกับวัตถุเล็ก ส่วน P5 เซลล์ใหญ่ 32 พิกเซล องุ่นทั้งลูกเล็กกว่าเซลล์เดียว',
+  },
+]);
+</script>
+</body>
+</html>

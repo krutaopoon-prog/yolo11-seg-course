@@ -233,6 +233,13 @@
         <canvas id="s33_map" width="300" height="300" style="width:100%;max-width:300px;cursor:crosshair"></canvas>
       </div>
     </div>
+    <p class="small" style="margin:10px 0 2px"><strong>แผนที่ loss แบบ 3 มิติ</strong>: พื้นผิว = MSE ของทุกเส้น (m, c) · เส้นชมพู = ทางที่ optimizer เดิน · ★ = ก้นหุบ · ลากเพื่อหมุน · คลิกบนพื้นผิวเพื่อเปลี่ยนจุดเริ่ม</p>
+    <div class="controls">
+      ความสูงของพื้นผิว: <button data-h33="lin">MSE จริง</button><button data-h33="log">log(MSE) (ขยายก้นหุบ)</button>
+      <button data-view3d="iso">เฉียง</button><button data-view3d="top">มองจากบน</button><button data-view3d="side">มองข้าง</button>
+      <button data-zoom3d="in">＋</button><button data-zoom3d="out">－</button>
+    </div>
+    <div id="s33_3d" style="width:100%;height:400px;border:1px solid var(--line);border-radius:6px"></div>
     <p class="small" style="margin:6px 0 0"><strong>loss ตามจำนวนก้าว</strong> (แกนตั้งแบบลอการิทึม)</p>
     <canvas id="s33_loss" width="640" height="150" style="width:100%"></canvas>
     <div class="sim-out" id="s33_out"></div>
@@ -243,6 +250,7 @@
         <li>SGD กับ η = 0.2 ขึ้นไป: เส้นทางกระโดดข้ามหุบไปมาแล้วกระเด็นออก เหมือนลูกบอลในซิม 3.2</li>
         <li>Momentum: ความเร็วสะสมตามท้องหุบ จึงถึง ★ เร็วกว่ามาก แต่อาจเลยไปแล้ววกกลับ</li>
         <li>Adam: ก้าวของ m และ c มีขนาดพอ ๆ กันตั้งแต่แรก แม้หุบจะรีมาก จึงเดินค่อนข้างตรงไปยัง ★</li>
+        <li>มุมมอง 3 มิติ: หุบไม่ใช่ชามกลม แต่เป็น <em>ร่องยาวที่วางเฉียง</em> ผนังร่องชันแต่ท้องร่องเกือบราบ เส้นของ SGD จึงไถลลงผนังก่อนแล้วค่อยคืบไปตามท้องร่อง ส่วน Momentum แกว่งข้ามร่องไปมาระหว่างทาง ลองกด log(MSE) เพื่อขยายส่วนก้นหุบให้เห็นชัดขึ้น (รูปทรงของร่องเหมือนเดิม แค่ยืดแกนตั้ง)</li>
       </ul>
     </div>
   </div>
@@ -352,11 +360,13 @@
   <footer>
     ข้อเท็จจริงของ YOLO11 ในบทนี้ตรวจกับ <strong>ultralytics 8.4.2</strong>: อ่าน source <code>cfg/default.yaml</code>, <code>engine/trainer.py</code> (build_optimizer), <code>utils/loss.py</code>, <code>optim/muon.py</code>
     และเทรน <code>yolo11n-seg.pt</code> บน <code>coco8-seg</code> 2 epoch เพื่อดู log และ results.csv จริง
-    · <a href="../chapter2/">← บทที่ 2</a> · <a href="../">สารบัญ</a> · บทถัดไป: การเทรนเครือข่าย: Backpropagation และ Overfitting (ยังไม่สร้าง)
+    · <a href="../chapter2/">← บทที่ 2</a> · <a href="../">สารบัญ</a> · <a href="../chapter4/">บทที่ 4 การเทรนเครือข่าย: Backpropagation และ Overfitting →</a>
   </footer>
 </main>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="../assets/common.js"></script>
+<script src="../assets/tensor3d.js"></script>
 <script>
 const f2 = (v, n = 2) => (Math.abs(v) < 5e-10 ? 0 : v).toFixed(n);
 const $ = id => document.getElementById(id);
@@ -691,6 +701,70 @@ function drawMap(cv, m, c, path, showGrad) {
   let st, timer = null;
   const OPT = { sgd: 'SGD', mom: 'Momentum (μ = 0.9)', adam: 'Adam (β₁ = 0.9, β₂ = 0.999)' };
 
+  // ---------- พื้นผิว loss 3 มิติ: x ↔ m, z ↔ c (c มากอยู่ด้านหลัง), y = ความสูงจาก MSE ----------
+  const S3 = new Scene3D($('s33_3d'), { views: { iso: [-0.55, 1.0], top: [0, 0.06], side: [0, Math.PI / 2 - 0.05] }, fitScale: 0.85 });
+  S3.bindButtons(root);
+  let hmode = 'lin';
+  const X3 = m => (m - 1) * 2, Z3 = c => -(c - 1), M3 = x => x / 2 + 1, C3 = z => 1 - z, HMAX = 4;
+  const L0 = FIT.mse(FIT.best_m, FIT.best_c);
+  let LMAX = 0;
+  for (let i = 0; i <= 40; i++) for (let j = 0; j <= 40; j++) LMAX = Math.max(LMAX, FIT.mse(FIT.M[0] + 4 * i / 40, FIT.C[0] + 8 * j / 40));
+  const hOf = L => (hmode === 'lin' ? L / LMAX * HMAX : (Math.log(L) - Math.log(L0)) / (Math.log(LMAX) - Math.log(L0)) * HMAX);
+  // สีตามระดับ log ของ MSE ชุดเดียวกับแผนที่ 2 มิติด้านบน
+  const lo3 = [31, 78, 140], mid3 = [140, 196, 222], hi3 = [253, 244, 225];
+  const col3 = L => { const t = Math.floor((Math.log(L) - Math.log(L0)) / (Math.log(LMAX) - Math.log(L0)) * 14) / 14;
+    return (t < 0.5 ? lo3.map((v, k) => v + (mid3[k] - v) * t * 2) : mid3.map((v, k) => v + (hi3[k] - v) * (t - 0.5) * 2)).map(v => v / 255); };
+  const P3 = {};
+  function build3d() {
+    if (!S3.ok) return;
+    S3.clear();
+    const T = S3.T, N = 90, g = new T.PlaneGeometry(8, 8, N, N); g.rotateX(-Math.PI / 2);
+    const pos = g.attributes.position, cols = [];
+    for (let i = 0; i < pos.count; i++) {
+      const L = FIT.mse(M3(pos.getX(i)), C3(pos.getZ(i)));
+      pos.setY(i, hOf(L)); cols.push(...col3(L));
+    }
+    g.setAttribute('color', new T.Float32BufferAttribute(cols, 3)); g.computeVertexNormals();
+    P3.surf = S3.add(new T.Mesh(g, new T.MeshLambertMaterial({ vertexColors: true, side: T.DoubleSide })));
+    // เส้นตารางบนพื้นผิว ทุก 0.5 หน่วยของ m และ c
+    const grid = [];
+    for (let k = 0; k <= 16; k++) {
+      const m = FIT.M[0] + k * 0.25, c = FIT.C[0] + k * 0.5, a = [], b = [];
+      for (let t = 0; t <= 60; t++) {
+        const cc = FIT.C[0] + 8 * t / 60, mm = FIT.M[0] + 4 * t / 60;
+        a.push([X3(m), hOf(FIT.mse(m, cc)) + 0.02, Z3(cc)]); b.push([X3(mm), hOf(FIT.mse(mm, c)) + 0.02, Z3(c)]);
+      }
+      grid.push(a, b);
+    }
+    grid.forEach(pts => { const l = S3.line(pts, 0x1f2933); l.material.transparent = true; l.material.opacity = 0.18; });
+    const star = S3.add(new T.Mesh(new T.OctahedronGeometry(0.16), new T.MeshLambertMaterial({ color: 0xffd400 })));
+    star.position.set(X3(FIT.best_m), hOf(L0) + 0.2, Z3(FIT.best_c));
+    // พื้นผิวจริงโค้งหงาย ตาข่ายสามเหลี่ยมจึงอยู่สูงกว่าค่าจริงเล็กน้อย ให้เส้นทางและลูกบอลวาดทับเสมอ
+    P3.path = S3.line([[0, 0, 0], [0, 0, 0]], 0xff00ff); P3.path.material.depthTest = false; P3.path.renderOrder = 10;
+    P3.ball = S3.add(new T.Mesh(new T.SphereGeometry(0.14, 16, 12), new T.MeshBasicMaterial({ color: 0xff00ff, depthTest: false }))); P3.ball.renderOrder = 11;
+    S3.pickables = [P3.surf];
+    S3.onPick = hit => { if (hit) { st.m0 = M3(hit.point.x); st.c0 = C3(hit.point.z); init(st.m0, st.c0); } };
+    S3.setLabels([
+      { pos: [4.4, 0, 4.2], text: 'm →', color: '#555' },
+      { pos: [-4.4, 0, -4.2], text: 'c (ถอยหลัง = มาก)', color: '#555' },
+      { pos: [X3(FIT.best_m), hOf(L0) + 0.6, Z3(FIT.best_c)], text: '★ ก้นหุบ', color: '#a07a00' },
+    ]);
+    S3.setBounds([-4, 0, -4], [4, HMAX, 4]);
+    root.querySelectorAll('[data-h33]').forEach(b => b.classList.toggle('on', b.dataset.h33 === hmode));
+  }
+  function update3d() {
+    if (!S3.ok || !P3.path) return;
+    const inside = ([m, c]) => m >= FIT.M[0] && m <= FIT.M[1] && c >= FIT.C[0] && c <= FIT.C[1];
+    const pts = [];
+    for (const p of st.path) { if (!inside(p)) break; pts.push([X3(p[0]), hOf(FIT.mse(p[0], p[1])) + 0.06, Z3(p[1])]); }
+    S3.setLine(P3.path, pts.length > 1 ? pts : [[0, -99, 0], [0, -99, 0]]);
+    const now = [st.m, st.c];
+    P3.ball.visible = inside(now);
+    if (P3.ball.visible) P3.ball.position.set(X3(now[0]), hOf(FIT.mse(now[0], now[1])) + 0.14, Z3(now[1]));
+    S3.render();
+  }
+  root.querySelectorAll('[data-h33]').forEach(b => b.addEventListener('click', () => { hmode = b.dataset.h33; build3d(); update3d(); }));
+
   function init(m, c) {
     stop();
     Object.assign(st, { m, c, vm: 0, vc: 0, am: 0, ac: 0, sm: 0, sc: 0, t: 0, path: [[m, c]], hist: [FIT.mse(m, c)], state: 'run' });
@@ -727,6 +801,7 @@ function drawMap(cv, m, c, path, showGrad) {
     $('s33_lr').value = st.lr; $('s33_lrv').textContent = st.lr.toFixed(3);
     root.querySelectorAll('[data-opt]').forEach(b => b.classList.toggle('on', b.dataset.opt === st.opt));
     $('s33_auto').textContent = timer ? '⏸ หยุด' : '▶ เดินอัตโนมัติ';
+    update3d();
     const [gm, gc] = FIT.grad(st.m, st.c), k = st.hist.length - 1;
     let msg = '';
     if (st.state === 'out') msg = '💥 <b>กระเด็นออก</b> learning rate ใหญ่เกินไปสำหรับ SGD/Momentum บนหุบที่ชันแบบนี้ ลองลด η';
@@ -752,6 +827,7 @@ function drawMap(cv, m, c, path, showGrad) {
     [st.m0, st.c0] = FIT.fromMap(x / W * FIT.S, y / W * FIT.S); init(st.m0, st.c0);
   });
   const reset = () => { stop(); st = { opt: 'sgd', lr: 0.05, m0: 2.6, c0: -2.2 }; init(st.m0, st.c0); };
+  build3d();
   root.querySelector('[data-act=reset]').addEventListener('click', reset);
   reset();
 })();

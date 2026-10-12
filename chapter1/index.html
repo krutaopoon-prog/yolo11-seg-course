@@ -184,6 +184,40 @@
     <figcaption>รูปที่ 1.2 ในแบบ CHW ภาพคือ "ตาราง 3 ชั้น" ช่อง R ทั้งภาพอยู่ชั้นแรก ตามด้วยชั้น G และชั้น B</figcaption>
   </figure>
 
+  <!-- ---------- ซิม 1.4 (3 มิติ) ---------- -->
+  <div class="sim" id="sim14">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 1.4 ภาพสีคือก้อนตัวเลข 3 มิติ</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "แยก 3 ช่องวางเรียงกัน" แล้วหาแอปเปิลแดงในแต่ละช่อง จากนั้นกด "ซ้อนเป็นก้อน" แล้วลากหมุนดูก้อน (3, 16, 16) จากนั้นกด "อ่านตามลำดับ HWC" กับ "CHW" แล้วเทียบแถบหน่วยความจำด้านล่างว่าเติมสีต่างกันอย่างไร</p>
+    <div class="controls">
+      <button data-m14="merge">ภาพสีที่ตาเห็น</button>
+      <button data-m14="side">แยก 3 ช่องวางเรียงกัน</button>
+      <button data-m14="stack">ซ้อนเป็นก้อน (C, H, W)</button>
+      <label><input type="checkbox" id="s14_batch"> เพิ่มมิติ batch (N = 4)</label>
+    </div>
+    <div class="controls">
+      <button data-walk="hwc">▶ อ่านตามลำดับ HWC</button>
+      <button data-walk="chw">▶ อ่านตามลำดับ CHW</button>
+      <span class="small muted">มุมมอง:</span>
+      <button data-view3d="iso">เฉียง</button><button data-view3d="front">หน้าตรง</button><button data-view3d="top">มองจากบน</button>
+      <button data-zoom3d="in">＋</button><button data-zoom3d="out">－</button>
+    </div>
+    <div id="s14_3d" style="width:100%;height:400px;border:1px solid #e2ded6;border-radius:6px"></div>
+    <p class="small muted" style="margin:2px 0 4px">ภาพผลไม้ย่อเหลือ 16 × 16 พิกเซลเพื่อให้นับลูกบาศก์ได้ · 1 ลูกบาศก์ = ตัวเลข 1 ตัว · ลากเพื่อหมุน · คลิกลูกบาศก์เพื่ออ่านค่าและตำแหน่ง</p>
+    <p class="small" style="margin:6px 0 2px"><strong>แถบหน่วยความจำ</strong> (ตัวเลข 768 ตัวเรียงต่อกันเป็นแถวเดียว แบ่งแสดง 2 บรรทัด)</p>
+    <canvas id="s14_mem" width="640" height="56" style="width:100%"></canvas>
+    <div class="sim-out" id="s14_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>แยก 3 ช่อง: ในช่อง R แอปเปิลแดงสว่างพอ ๆ กับผนังสีครีม (204 เทียบกับราว 232) แยกกันไม่ออก แต่ในช่อง G แอปเปิลมืด (60) ขณะที่ผนังยังสว่าง (ราว 226) สีแดงจึงเกิดจาก "R มาก G น้อย B น้อย" และต้องดูหลายช่องพร้อมกันจึงจะรู้ว่าเป็นสีอะไร</li>
+        <li>"ซ้อนเป็นก้อน" คือหน้าตาจริงของ tensor (3, 16, 16) แผ่นทั้งสามมีขนาดเท่ากันและวางตรงกันพิกเซลต่อพิกเซล</li>
+        <li>อ่านตามลำดับ HWC: ลูกบาศก์สีเหลืองกระโดด R → G → B ของพิกเซลเดียวกันจนครบ 3 ช่องแล้วค่อยเลื่อนไปพิกเซลถัดไป แถบหน่วยความจำจึงเป็นลาย แดง-เขียว-น้ำเงิน สลับกันถี่ ๆ</li>
+        <li>อ่านตามลำดับ CHW: ไล่แผ่น R จนครบทั้ง 256 ตัวก่อน แล้วจึงไปแผ่น G และ B แถบหน่วยความจำจึงเป็นสามก้อนใหญ่ ตัวเลขชุดเดียวกันทั้งหมด ต่างกันแค่ลำดับ (เหมือนซิม 1.3 แต่เห็นเป็นก้อน)</li>
+        <li>เปิด batch: ได้ 4 ก้อนเรียงกัน shape (4, 3, 16, 16) ทุกก้อนต้องมีขนาดเท่ากันจึงต่อกันเป็น tensor เดียวได้</li>
+      </ul>
+    </div>
+  </div>
+
   <p>
     ทำไม PyTorch ใช้ CHW ในบทที่ 5 คุณจะเห็นว่า convolution ทำงานบน "ระนาบ" H × W ของแต่ละช่อง
     การเก็บตัวเลขของช่องเดียวกันไว้ติดกันจึงสะดวกต่อการคำนวณ และไลบรารีของ PyTorch ก็ออกแบบให้ใช้ลำดับนี้เป็นค่าเริ่มต้น
@@ -471,7 +505,9 @@ print(x.numel())                                    <span class="cmt"># 921600</
   </footer>
 </main>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="../assets/common.js"></script>
+<script src="../assets/tensor3d.js"></script>
 <script>
 /* =========================================================
    ซิม 1.1 ส่องพิกเซล
@@ -628,6 +664,132 @@ print(x.numel())                                    <span class="cmt"># 921600</
   }
   root.querySelector('[data-act=reset]').addEventListener('click', () => { sel = { y: 0, x: 0 }; draw(); });
   sel = { y: 1, x: 2 }; draw();
+})();
+
+/* =========================================================
+   ซิม 1.4 ภาพสีเป็นก้อน 3 มิติ (Scene3D ใน assets/tensor3d.js)
+   แกน x = คอลัมน์ (W), y = แถว (H, ลงล่างเป็นลบ), z = ช่อง (C, ถอยหลังเป็นลบ)
+   ========================================================= */
+(function () {
+  const root = document.getElementById('sim14'), out = document.getElementById('s14_out'), memCv = document.getElementById('s14_mem');
+  const H = 16, W = 16, C = 3, NB = 4, GAP = 3, PER = C * H * W;
+  const small = document.createElement('canvas'); small.width = W; small.height = H;
+  const sc = small.getContext('2d'); sc.imageSmoothingQuality = 'high'; sc.drawImage(makeFruitImage(160, 160), 0, 0, W, H);
+  const base = sc.getImageData(0, 0, W, H).data;
+  // ภาพใน batch: ต้นฉบับ, กลับซ้ายขวา, มืดลง, กลับซ้ายขวา+มืดลง
+  const val = (n, c, y, x) => { const xx = n % 2 ? W - 1 - x : x; return Math.round(base[(y * W + xx) * 4 + c] * (n >= 2 ? 0.6 : 1)); };
+  const S3 = new Scene3D(document.getElementById('s14_3d'), { views: { iso: [-0.7, 1.12] } });
+  S3.bindButtons(root);
+  const CN = ['R', 'G', 'B'], CHCOL = ['#d6453d', '#2f9e55', '#3b6fd6'];
+  let st, mesh = null, timer = null, anim = null;
+  // ตำแหน่งของลูกบาศก์ในแต่ละโหมด: merge = ภาพสีแผ่นเดียว, side = 3 ช่องวางเรียงข้างกัน, stack = ซ้อนเป็นก้อน (C, H, W)
+  const modeW = m => (m === 'side' ? 3 * W + 4 : W);
+  const posFor = (m, c, y, x) => (m === 'side' ? [x + c * (W + 2), -y, 0] : m === 'stack' ? [x, -y, -c * GAP] : [x, -y, 0]);
+  const idx = (n, c, y, x) => ((n * C + c) * H + y) * W + x;   // ลำดับของ instance = ลำดับ NCHW
+
+  // ลำดับที่ k ของการอ่าน → ตำแหน่งแบบ CHW (c*H*W + y*W + x)
+  function order(mode, k) {
+    if (mode === 'chw') return k;
+    const c = k % C, p = Math.floor(k / C);   // HWC: ช่องเปลี่ยนเร็วที่สุด
+    return c * H * W + p;
+  }
+  function build() {
+    if (!S3.ok) return;
+    S3.clear();
+    mesh = S3.boxes(NB * PER, 0.86);
+    S3.pickables = [mesh];
+    S3.onPick = hit => { if (hit && hit.instanceId !== undefined) { st.pick = hit.instanceId; layout(); } };
+    layout();
+  }
+  function layout() {
+    drawMem(); info();
+    if (!S3.ok || !mesh) return;
+    const T = S3.T, u = st.u, col = new T.Color(), cc = new T.Color(), yellow = new T.Color(0xffe600), nShow = st.batch ? NB : 1;
+    const wm = (st.from === 'merge' ? 1 - u : 0) + (st.to === 'merge' ? u : 0);   // น้ำหนักของโหมดภาพสี
+    const bw = (1 - u) * modeW(st.from) + u * modeW(st.to) + GAP;                    // ระยะระหว่างภาพใน batch
+    const trail = new Map();
+    if (st.walk) for (let j = 0; j < 14 && st.k - j >= 0; j++) trail.set(order(st.walk, st.k - j), j);
+    for (let n = 0; n < NB; n++) for (let c = 0; c < C; c++) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = idx(n, c, y, x), v = val(n, c, y, x), sc = c === 0 ? 1 : 1 - wm, show = n < nShow && sc > 0.02;
+      const tr = n === 0 ? trail.get(c * H * W + y * W + x) : undefined;
+      const a = posFor(st.from, c, y, x), b = posFor(st.to, c, y, x);
+      S3.place(mesh, i, n * bw + a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u, show ? sc * (tr === 0 ? 1.35 : 1) : 0);
+      cc.setRGB(c === 0 ? v / 255 : 0, c === 1 ? v / 255 : 0, c === 2 ? v / 255 : 0);
+      if (c === 0) { col.setRGB(val(n, 0, y, x) / 255, val(n, 1, y, x) / 255, val(n, 2, y, x) / 255); col.lerp(cc, 1 - wm); } else col.copy(cc);
+      if (tr !== undefined) col.lerp(yellow, 1 - tr / 14);
+      if (st.pick === i) col.set(0xff00ff);
+      mesh.setColorAt(i, col);
+    }
+    mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    const m = u > 0.5 ? st.to : st.from, labs = [{ pos: [-1.6, -(H - 1) / 2, 0], text: 'H ↓', color: '#555' }, { pos: [(W - 1) / 2, -H - 0.4, 0], text: 'W →', color: '#555' }];
+    if (m === 'merge') labs.push({ pos: [(W - 1) / 2, 1.3, 0], text: 'ภาพสี 16 × 16', color: '#1f2933' });
+    else [0, 1, 2].forEach(c => { const p = posFor(m, c, 0, (W - 1) / 2); labs.push({ pos: [p[0], 1.3, p[2]], text: m === 'side' ? `ช่อง ${CN[c]}` : CN[c], color: CHCOL[c] }); });
+    if (st.batch) for (let n = 1; n < NB; n++) labs.push({ pos: [n * bw + (W - 1) / 2, 2.3, 0], text: `ภาพที่ ${n}`, color: '#555' });
+    S3.setLabels(labs);
+    const depth = st.from === 'stack' || st.to === 'stack' ? 2 * GAP : 1;
+    S3.setBounds([-2, -H, -depth - 0.5], [(nShow - 1) * bw + Math.max(modeW(st.from), modeW(st.to)), 2.5, 0.5]);
+    S3.render();
+  }
+  function drawMem() {
+    const { ctx, W: CW, H: CH } = setupCanvas(memCv), rows = 2, per = PER / rows, cw = CW / per;
+    ctx.fillStyle = '#f3f1ec'; ctx.fillRect(0, 0, CW, CH);
+    if (!st.walk) { ctx.fillStyle = '#888'; ctx.font = '12px Sarabun, sans-serif'; ctx.fillText('กดปุ่ม "อ่านตามลำดับ" เพื่อเติมแถบนี้', 8, 32); return; }
+    for (let k = 0; k <= st.k && k < PER; k++) {
+      const q = order(st.walk, k), c = Math.floor(q / (H * W)), r = Math.floor(k / per);
+      ctx.fillStyle = CHCOL[c]; ctx.fillRect((k % per) * cw, r * (CH / rows) + 2, Math.max(cw, 1), CH / rows - 4);
+    }
+  }
+  function info() {
+    const shape = st.batch ? `(4, 3, ${H}, ${W})` : `(3, ${H}, ${W})`, count = (st.batch ? NB : 1) * PER;
+    let t = `ก้อนนี้คือ tensor shape <b>${shape}</b> = ${count.toLocaleString('en-US')} ตัวเลข (ภาพจริง 640 × 640 จะมี 1,228,800 ตัว)<br>`;
+    if (st.walk) {
+      const k = Math.min(st.k, PER - 1), q = order(st.walk, k), c = Math.floor(q / (H * W)), y = Math.floor(q / W) % H, x = q % W;
+      t += `อ่านแบบ <b>${st.walk.toUpperCase()}</b>: ตัวที่ ${k} ในหน่วยความจำคือช่อง <b style="color:${CHCOL[c]}">${CN[c]}</b> แถว y = ${y} คอลัมน์ x = ${x} ค่า = ${val(0, c, y, x)}` +
+           (st.walk === 'hwc' ? ' (ช่องเปลี่ยนทุกตัว → R G B ของพิกเซลเดียวกันอยู่ติดกัน)' : ' (อ่านช่องเดียวจนครบทั้งแผ่นก่อน)') + '<br>';
+    }
+    if (st.pick !== null) {
+      const i = st.pick, x = i % W, y = Math.floor(i / W) % H, c = Math.floor(i / (W * H)) % C, n = Math.floor(i / PER);
+      t += `<span style="color:#c0007a">ลูกบาศก์ที่คลิก: ${st.batch ? `t[${n}, ${c}, ${y}, ${x}]` : `t[${c}, ${y}, ${x}]`} = <b>${val(n, c, y, x)}</b> (ช่อง ${CN[c]}) · ` +
+           `อยู่ลำดับที่ ${c * H * W + y * W + x} ถ้าเก็บแบบ CHW และลำดับที่ ${(y * W + x) * C + c} ถ้าเก็บแบบ HWC</span>`;
+    } else t += '<span class="muted">คลิกลูกบาศก์เพื่ออ่านค่าและตำแหน่ง</span>';
+    out.innerHTML = t;
+  }
+  function morph(target) {
+    if (anim) cancelAnimationFrame(anim);
+    st.from = st.u > 0.5 ? st.to : st.from; st.to = target; st.u = 0;
+    const start = performance.now();
+    const go = now => {
+      const k = Math.min(1, (now - start) / 700);
+      st.u = k < 0.5 ? 2 * k * k : 1 - 2 * (1 - k) * (1 - k);
+      layout(); if (k < 1) anim = requestAnimationFrame(go); else { anim = null; st.from = target; }
+    };
+    anim = requestAnimationFrame(go);
+    root.querySelectorAll('[data-m14]').forEach(b => b.classList.toggle('on', b.dataset.m14 === target));
+  }
+  function stopWalk() { if (timer) { cancelAnimationFrame(timer); timer = null; } }
+  function walk(mode) {
+    stopWalk(); st.walk = mode; st.k = 0; let acc = 0;
+    if (st.to === 'merge') morph('side');
+    // ช่วงแรกเดินช้าให้เห็นทิศทาง แล้วค่อยเร่ง (คิดตามเวลาจริง จึงเร็วเท่ากันทุกเครื่อง)
+    let last = performance.now();
+    const go = now => { const dt = Math.min(100, now - last); last = now; acc += dt * (st.k < 24 ? 0.012 : 0.25); while (acc >= 1 && st.k < PER - 1) { st.k++; acc--; } layout(); timer = st.k < PER - 1 ? requestAnimationFrame(go) : null; };
+    timer = requestAnimationFrame(go);
+    root.querySelectorAll('[data-walk]').forEach(b => b.classList.toggle('on', b.dataset.walk === mode));
+  }
+  root.querySelectorAll('[data-m14]').forEach(b => b.addEventListener('click', () => morph(b.dataset.m14)));
+  root.querySelectorAll('[data-walk]').forEach(b => b.addEventListener('click', () => walk(b.dataset.walk)));
+  document.getElementById('s14_batch').addEventListener('change', e => { st.batch = e.target.checked; st.pick = null; layout(); });
+  function reset() {
+    stopWalk(); if (anim) cancelAnimationFrame(anim);
+    st = { from: 'merge', to: 'merge', u: 1, batch: false, walk: null, k: 0, pick: null };
+    document.getElementById('s14_batch').checked = false;
+    root.querySelectorAll('[data-m14]').forEach(b => b.classList.toggle('on', b.dataset.m14 === 'merge'));
+    root.querySelectorAll('[data-walk]').forEach(b => b.classList.remove('on'));
+    S3.view.zoom = 1; S3.setView('iso'); build();
+    if (!S3.ok) layout();
+  }
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
 })();
 
 /* =========================================================

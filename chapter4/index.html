@@ -1,0 +1,1251 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>บทที่ 4 การเทรนเครือข่าย: Backpropagation และ Overfitting | เข้าใจ YOLO11-seg</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    .graph-wrap { overflow-x: auto; }
+    .graph-wrap svg { display: block; width: 100%; height: auto; }
+    .aug-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 8px 0; }
+    .aug-grid figure { margin: 0; text-align: left; }
+    .aug-grid canvas { width: 100%; display: block; border-radius: 4px; }
+    .aug-grid figcaption { font-size: 0.8rem; line-height: 1.4; margin-top: 2px; }
+    .legend-dot { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -1px; margin-right: 3px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="topnav"><a href="../">← สารบัญ</a> · หน่วยที่ 1 พื้นฐานการเรียนรู้ของเครื่อง</p>
+  <h1>บทที่ 4 การเทรนเครือข่าย: Backpropagation และ Overfitting</h1>
+  <p class="muted">gradient ของทุก weight มาจากไหน, ข้อมูลถูกป้อนเป็นรอบ ๆ อย่างไร และทำไม "เก่งตอนเทรน" ไม่ได้แปลว่า "เก่งจริง"</p>
+
+  <!-- ===================== 1. วัตถุประสงค์ ===================== -->
+  <div class="box info">
+    <span class="box-title">🎯 วัตถุประสงค์การเรียนรู้</span>
+    เมื่อจบบทนี้ คุณควรทำสิ่งต่อไปนี้ได้
+    <ol>
+      <li>อธิบาย forward pass และ backward pass ได้ และใช้กฎลูกโซ่ (chain rule) หา gradient บนกราฟการคำนวณเล็ก ๆ ได้</li>
+      <li>อธิบายความหมายของ epoch, batch, iteration และคำนวณจำนวน iteration ต่อ epoch ได้</li>
+      <li>อธิบายหน้าที่ของชุด train / validation / test และอ่านสัญญาณ overfitting กับ underfitting จากกราฟ loss ได้</li>
+      <li>อธิบายว่า data augmentation และ transfer learning ช่วยลด overfitting ได้อย่างไร และบอกความต่างระหว่างเริ่มเทรนจาก <code>yolo11n-seg.pt</code> กับ <code>yolo11n-seg.yaml</code> ได้</li>
+      <li>อธิบายว่า data leakage คืออะไร เกิดจากอะไร และแบ่งข้อมูลอย่างไรจึงจะไม่รั่ว</li>
+    </ol>
+  </div>
+
+  <!-- ===================== 2. ทบทวน ===================== -->
+  <h2>ทบทวนความรู้เดิม</h2>
+  <p>
+    ในบทที่ 3 คุณเห็นว่าการเทรนก็คือการทำซ้ำสูตร <strong>w ← w − η · ∂L/∂w</strong> และในซิม 3.4 นิวรอนตัวเดียวก็ปรับ w₁, w₂, b เองจนแยกพิกเซลแอปเปิลได้
+    นิวรอนตัวนั้นมี weight แค่ 3 ตัว จึงเขียนสูตรความชันของแต่ละตัวได้ตรง ๆ
+    แต่ yolo11n-seg มีนิวรอนต่อกันเป็นร้อยชั้น และมี weight 2,876,848 ตัว คำถามแรกของบทนี้คือ
+    <strong>จะหา ∂L/∂w ของทุกตัวได้อย่างไรในเวลาอันสั้น</strong> คำตอบคือ backpropagation
+    คำถามที่สองคือ เมื่อ loss ลดลงแล้ว <strong>เราจะรู้ได้อย่างไรว่าโมเดลเก่งจริง ไม่ได้แค่จำข้อสอบ</strong>
+  </p>
+
+  <!-- ===================== 3. เนื้อหา ===================== -->
+  <h2>4.1 Forward pass และ Backward pass</h2>
+  <p>
+    เครือข่ายประสาทเทียมคือการคำนวณย่อย ๆ ต่อกันเป็นสาย เช่น คูณ, บวก, ผ่าน SiLU, คูณ, บวก, แล้วเทียบกับเฉลย
+    ถ้าวาดแต่ละขั้นเป็นโหนดแล้วโยงด้วยลูกศร จะได้ <strong>กราฟการคำนวณ (computational graph)</strong>
+  </p>
+  <ul>
+    <li><strong>Forward pass (ขาไป)</strong>: ป้อนข้อมูลทางซ้าย แล้วคำนวณไปทางขวาทีละโหนดจนได้คำทำนาย และได้ loss ที่ปลายทาง</li>
+    <li><strong>Backward pass (ขากลับ)</strong>: เริ่มจาก loss แล้วย้อนไปทางซ้ายทีละโหนด เพื่อหาว่า "ถ้าค่านี้ขยับนิดหนึ่ง loss จะขยับกี่เท่า" ของทุกค่าในกราฟ
+      การย้อนกลับแบบนี้เรียกว่า <strong>backpropagation</strong> [Rumelhart1986]</li>
+  </ul>
+
+  <h3>กฎลูกโซ่: คูณความชันต่อกันไปตามทาง</h3>
+  <p>
+    ลองนึกถึงเฟืองที่ต่อกันเป็นทอด ๆ ถ้าหมุนเฟืองแรก 1 รอบแล้วเฟืองที่สองหมุน 3 รอบ และเฟืองที่สองหมุน 1 รอบแล้วเฟืองที่สามหมุน 2 รอบ
+    แปลว่าหมุนเฟืองแรก 1 รอบ เฟืองที่สามจะหมุน 3 × 2 = <strong>6 รอบ</strong>
+    กฎลูกโซ่ก็คือแบบนี้ ความชันจาก w ไปถึง L เท่ากับ <strong>ผลคูณของความชันเฉพาะที่ (local slope) ของทุกโหนดที่อยู่ระหว่างทาง</strong>
+  </p>
+  <pre><code>u = w·x  →  ŷ = u + b  →  L = (ŷ − y)²
+
+∂L/∂w  =  ∂L/∂ŷ   ×  ∂ŷ/∂u  ×  ∂u/∂w
+       =  2(ŷ − y) ×    1     ×    x</code></pre>
+  <p>
+    แต่ละโหนดต้องรู้แค่ความชันของตัวเอง เช่น โหนด "+b" รู้ว่าอินพุตขยับเท่าไหร่ เอาต์พุตก็ขยับเท่านั้น (ความชัน 1)
+    ส่วนโหนด "×w" รู้ว่าถ้า w ขยับ 1 หน่วย เอาต์พุตจะขยับ x หน่วย
+    backward pass จึงทำได้ง่ายมาก คือส่งตัวเลขย้อนกลับมาทีละโหนด แล้วแต่ละโหนดคูณความชันของตัวเองเข้าไปก่อนส่งต่อ ลองกดดูในซิมด้านล่าง
+  </p>
+
+  <!-- ---------- ซิม 4.1 ---------- -->
+  <div class="sim" id="s41">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 4.1 กราฟคำนวณ: ตัวเลขไหลไปข้างหน้า gradient ไหลย้อนกลับ</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "เดินหน้า" จนได้ L แล้วกด "ย้อนกลับ" ทีละโหนด สังเกตว่าตัวเลขสีแดงแต่ละตัวเกิดจากการคูณอะไรกับอะไร จากนั้นกด "ปรับ weight 1 ก้าว" แล้วดูว่า L ลดลงหรือไม่</p>
+    <div class="controls">
+      เครือข่าย:
+      <button data-mode="one">นิวรอน 1 ตัว (ไม่มี activation)</button>
+      <button data-mode="two">2 ชั้น (มี SiLU คั่น)</button>
+    </div>
+    <div class="controls">
+      <button id="s41_fwd">▶ เดินหน้า 1 โหนด</button>
+      <button id="s41_bwd">◀ ย้อนกลับ 1 โหนด</button>
+      <button id="s41_upd">ปรับ weight 1 ก้าว (η = 0.1)</button>
+    </div>
+    <div class="graph-wrap" id="s41_graph"></div>
+    <p class="small muted" style="margin:2px 0 6px">
+      <span style="color:#1f5fbf">สีน้ำเงิน = ค่าจาก forward pass</span> ·
+      <span style="color:#d6453d">สีแดง = gradient จาก backward pass (ถ้าค่านี้เพิ่ม 1 หน่วยเล็ก ๆ L จะเปลี่ยนกี่เท่า)</span> ·
+      x กับ y คือพิกเซลและเฉลย จึงไม่ถูกปรับ
+    </p>
+    <div class="sim-out" id="s41_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s41_see">
+        <li>ตัวเลขสีแดงทุกตัวได้จาก "ตัวเลขสีแดงที่อยู่ทางขวา × ความชันเฉพาะที่ของโหนด" ไม่มีโหนดไหนต้องรู้สูตรทั้งสาย</li>
+        <li>นิวรอน 1 ตัว: L = 0.25, ∂L/∂w = −0.8 และ ∂L/∂b = −1 (ติดลบทั้งคู่ แปลว่าควรเพิ่ม w และ b) พอปรับ 1 ก้าว L ลดเหลือราว 0.113</li>
+        <li>gradient ของ b (−1) ใหญ่กว่าของ w (−0.8) เพราะ w ต้องคูณ x = 0.8 อีกที ความชันจึงขึ้นกับค่าของข้อมูลที่ไหลผ่านด้วย</li>
+        <li>เมื่อย้อนกลับครบแล้ว กล่องผลลัพธ์จะลอง "ขยับ w จริง ๆ 0.001" แล้ววัดว่า L เปลี่ยนเท่าไร ผลหารที่ได้ตรงกับ gradient จาก backpropagation แทบทุกหลัก</li>
+        <li>2 ชั้น: gradient ที่ส่งกลับมาถึง h ไม่ได้ใช้ปรับ h (h ไม่ใช่ weight) แต่ถูก "ส่งต่อ" ผ่าน SiLU ไปให้ w₁, b₁ ในชั้นแรก นี่คือหัวใจของการเทรนเครือข่ายหลายชั้น</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>ทำไม backpropagation จึงเร็ว</h3>
+  <p>
+    ถ้าจะหา ∂L/∂w ด้วยการ "ขยับ w ทีละตัวแล้ววัด L ใหม่" แบบที่ซิมใช้ตรวจคำตอบ จะต้องคำนวณ forward ใหม่ 2,876,848 รอบต่อการปรับหนึ่งครั้ง
+    ส่วน backpropagation เดินย้อนกลับ <em>รอบเดียว</em> แล้วใช้ตัวเลขสีแดงของโหนดทางขวาซ้ำสำหรับทุกโหนดทางซ้าย จึงได้ gradient ของทุก weight พร้อมกัน
+    ใช้เวลาเพียงประมาณ 2 เท่าของ forward pass หนึ่งรอบ
+  </p>
+  <p>
+    ในทางปฏิบัติไม่มีใครเขียน backward เอง ไลบรารี PyTorch จดกราฟการคำนวณไว้ระหว่าง forward แล้วคำนวณขากลับให้ทั้งหมดด้วยคำสั่งเดียว
+    ใน <code>engine/trainer.py</code> ของ Ultralytics วงจรเทรนทุก iteration มีสามจังหวะ คือ forward ได้ loss → <code>backward()</code> → <code>optimizer_step()</code> ซึ่งก็คือสามขั้นในซิมด้านบน
+  </p>
+  <div class="box tip">
+    <span class="box-title">💡 ผลคูณยาว ๆ มีปัญหาของมัน</span>
+    gradient ของชั้นแรก ๆ คือผลคูณของความชันจากทุกชั้นที่อยู่ระหว่างทาง ถ้าแต่ละชั้นมีความชันน้อยกว่า 1 เช่น 0.5 ต่อกัน 30 ชั้น จะเหลือ 0.5³⁰ ≈ 0.000000001
+    ชั้นแรก ๆ แทบไม่ได้เรียนรู้ ปัญหานี้เรียกว่า <strong>vanishing gradient</strong>
+    เครือข่ายสมัยใหม่อย่าง YOLO11 แก้ด้วย activation ที่ความชันไม่หดเร็ว (SiLU), BatchNorm และ "ทางลัด" (residual connection) ซึ่งจะเรียนในบทที่ 6
+  </div>
+
+  <h2>4.2 Epoch, Batch และ Iteration</h2>
+  <p>
+    การเทรนจริงไม่ได้คำนวณ loss จากภาพทั้งชุดในครั้งเดียว เพราะหน่วยความจำไม่พอ แต่จะแบ่งภาพเป็นกลุ่มเล็ก ๆ
+  </p>
+  <div class="table-wrap">
+  <table>
+    <tr><th>คำ</th><th>ความหมาย</th></tr>
+    <tr><td><strong>batch</strong></td><td>กลุ่มภาพที่ป้อนเข้าโมเดลพร้อมกัน loss ของ batch คือค่าเฉลี่ยของภาพในกลุ่ม ขนาดกลุ่มเรียกว่า <strong>batch size</strong></td></tr>
+    <tr><td><strong>iteration</strong></td><td>การทำงาน 1 รอบกับ 1 batch: forward → loss → backward (→ ปรับ weight)</td></tr>
+    <tr><td><strong>epoch</strong></td><td>ป้อนภาพในชุดเทรน <em>ครบทุกภาพ</em> 1 รอบ แต่ละ epoch จะสุ่มลำดับภาพใหม่ ภาพจึงไปอยู่คนละ batch กับรอบก่อน</td></tr>
+  </table>
+  </div>
+  <pre><code>iteration ต่อ epoch = ⌈ จำนวนภาพ / batch size ⌉        (⌈ ⌉ = ปัดขึ้น)
+ตัวอย่าง: 1,000 ภาพ, batch 16 → 1000/16 = 62.5 → 63 iteration (batch สุดท้ายมี 8 ภาพ)</code></pre>
+  <p>
+    การคำนวณ gradient จาก batch เล็ก ๆ แทนที่จะใช้ทั้งชุด คือที่มาของคำว่า <strong>stochastic</strong> ใน SGD (บทที่ 3)
+    ทิศที่ได้แต่ละครั้งแกว่งไปบ้างเพราะขึ้นกับว่าสุ่มได้ภาพไหน แต่โดยเฉลี่ยชี้ไปทางเดียวกับ gradient ของทั้งชุด และเร็วกว่ามาก
+  </p>
+
+  <!-- ---------- ซิม 4.2 ---------- -->
+  <div class="sim" id="s42">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 4.2 เครื่องคิดเลข iteration</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองเปลี่ยน batch size ระหว่าง 8, 16, 32 แล้วสังเกตจำนวนกลุ่มสีในแต่ละแถว จากนั้นลองชุดข้อมูลตัวอย่างอื่นแล้วดูว่า Ultralytics เลือก optimizer ตัวไหน</p>
+    <div class="controls">
+      ตัวอย่าง:
+      <button data-pre="small">50 ภาพ (ดูภาพรวม)</button>
+      <button data-pre="coco8">coco8-seg (4 ภาพ)</button>
+      <button data-pre="fruit">ผลไม้ 1,000 ภาพ</button>
+      <button data-pre="coco">COCO train2017</button>
+    </div>
+    <div class="controls">
+      <label>จำนวนภาพเทรน <input type="number" id="s42_n" min="1" max="1000000" style="width:100px"></label>
+      <label>batch <select id="s42_b"><option>1</option><option>2</option><option>4</option><option>8</option><option>16</option><option>32</option><option>64</option><option>128</option></select></label>
+      <label>epochs <input type="number" id="s42_e" min="1" max="1000" style="width:70px"></label>
+    </div>
+    <canvas id="s42_cv" width="640" height="190" style="width:100%"></canvas>
+    <div class="sim-out" id="s42_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>แต่ละแถวคือ 1 epoch แต่ละกลุ่มสีคือ 1 batch = 1 iteration ภาพที่ขอบดำคือภาพหมายเลข 1 ภาพเดิม ซึ่งไปอยู่คนละ batch ในแต่ละ epoch เพราะมีการสุ่มลำดับใหม่ทุกรอบ</li>
+        <li>50 ภาพ, batch 16 → 4 iteration ต่อ epoch โดย batch สุดท้ายมีแค่ 2 ภาพ Ultralytics ไม่ทิ้ง batch ที่ไม่เต็ม (ยกเว้นเมื่อเปิด <code>compile</code>)</li>
+        <li>coco8-seg มี 4 ภาพ batch 16 จึงได้แค่ 1 iteration ต่อ epoch เทรน 30 epoch ก็ได้ 30 iteration และทั้งหมดยังอยู่ในช่วง warmup (100 iteration แรก)</li>
+        <li>COCO train2017 (118,287 ภาพ) 100 epoch มีมากกว่า 10,000 ก้าว Ultralytics จึงเลือก SGD lr 0.01 ส่วนชุดผลไม้ 1,000 ภาพได้ MuSGD (ตามตารางในบทที่ 3)</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="box tip">
+    <span class="box-title">💡 ใน Ultralytics: 1 iteration ไม่จำเป็นต้องปรับ weight 1 ครั้ง</span>
+    Ultralytics มีค่า <code>nbs = 64</code> (nominal batch size) ถ้าตั้ง batch = 16 มันจะ <em>สะสม gradient</em> จาก 4 batch (16 × 4 = 64 ภาพ) แล้วค่อยปรับ weight ครั้งเดียว
+    เรียกว่า <strong>gradient accumulation</strong> ผลคือการปรับแต่ละครั้งใช้ข้อมูลราว 64 ภาพเสมอ ไม่ว่าจะตั้ง batch เท่าไร (ช่วง warmup ช่วงแรกจะค่อย ๆ เพิ่มจำนวนที่สะสมจาก 1 ขึ้นไป)
+  </div>
+
+  <h2>4.3 Train, Validation และ Test</h2>
+  <p>
+    ลองนึกถึงนักเรียนเตรียมสอบ ถ้าวัดความเก่งด้วยแบบฝึกหัดที่ทำมาแล้วพร้อมเฉลย คะแนนย่อมสูงเกินจริง เพราะนักเรียนอาจ <em>จำเฉลย</em> ได้โดยไม่เข้าใจ
+    โมเดลก็เป็นแบบเดียวกัน จึงต้องแบ่งข้อมูลเป็น 3 ชุดที่ไม่ซ้ำกัน
+  </p>
+  <figure>
+    <svg viewBox="0 0 640 150" role="img" aria-label="การแบ่งข้อมูลเป็น train validation test">
+      <rect x="10" y="20" width="430" height="44" fill="#5b8fd1"/>
+      <rect x="440" y="20" width="125" height="44" fill="#e3a33b"/>
+      <rect x="565" y="20" width="65" height="44" fill="#3f9d5a"/>
+      <g font-family="Sarabun, sans-serif" font-size="15" fill="#fff" font-weight="700" text-anchor="middle">
+        <text x="225" y="48">Train ~70%</text><text x="502" y="48">Val ~20%</text><text x="597" y="48">Test</text>
+      </g>
+      <g font-family="Sarabun, sans-serif" font-size="13" fill="#1f2933" text-anchor="middle">
+        <text x="225" y="88">แบบฝึกหัดพร้อมเฉลย</text>
+        <text x="225" y="106">ใช้คำนวณ loss และ gradient ปรับ weight</text>
+        <text x="502" y="88">ข้อสอบซ้อม</text>
+        <text x="502" y="106">ไม่ใช้ปรับ weight แต่ใช้</text>
+        <text x="502" y="124">เลือก epoch ที่ดีที่สุด/ตั้งค่า</text>
+        <text x="597" y="88">ข้อสอบจริง</text>
+        <text x="597" y="106">ใช้ครั้งเดียว</text>
+        <text x="597" y="124">ตอนจบงาน</text>
+      </g>
+    </svg>
+    <figcaption>รูปที่ 4.1 การแบ่งข้อมูล สัดส่วนเป็นเพียงตัวอย่างที่นิยม ไม่ใช่กฎตายตัว</figcaption>
+  </figure>
+  <ul>
+    <li><strong>Train</strong>: โมเดลเห็นทั้งภาพและเฉลย และใช้ปรับ weight</li>
+    <li><strong>Validation (val)</strong>: ใช้วัดผลระหว่างเทรน เพื่อเลือกว่า epoch ไหนดีที่สุดและเปรียบเทียบการตั้งค่าต่าง ๆ เช่น learning rate หรือขนาดรุ่น ข้อมูลชุดนี้ไม่ได้ใช้ปรับ weight โดยตรง แต่เรา "ปรับการตัดสินใจ" ตามมัน คะแนนจึงเริ่มเข้าข้างชุดนี้บ้าง</li>
+    <li><strong>Test</strong>: เก็บไว้ไม่แตะเลยจนตัดสินใจทุกอย่างเสร็จ แล้ววัดครั้งเดียวเพื่อรายงานผล นี่คือคะแนนที่ใกล้เคียงการใช้งานจริงที่สุด</li>
+  </ul>
+  <div class="box tip">
+    <span class="box-title">💡 ใน Ultralytics</span>
+    ไฟล์ <code>data.yaml</code> ระบุโฟลเดอร์ <code>train:</code>, <code>val:</code> และ <code>test:</code> (ไม่บังคับ) ค่าเริ่มต้น <code>val=True</code> จะวัดผลกับชุด val <em>ทุก epoch</em>
+    แล้วบันทึกน้ำหนักของ epoch ที่ดีที่สุดเป็น <code>best.pt</code> (และ epoch ล่าสุดเป็น <code>last.pt</code>)
+    คำว่า "ดีที่สุด" ใน 8.4.2 วัดด้วยค่า fitness ซึ่งสำหรับงาน segmentation คือ mAP50-95 ของกล่อง + mAP50-95 ของ mask (บทที่ 8)
+    ส่วน coco8-seg มีภาพ train 4 ภาพ val 4 ภาพ และไม่มี test
+  </div>
+
+  <h2>4.4 Overfitting และ Underfitting</h2>
+  <p>
+    <strong>Overfitting</strong> คือโมเดลจำรายละเอียดของชุดเทรน <em>รวมถึงสัญญาณรบกวน (noise)</em> จนทำนายชุดเทรนได้เกือบสมบูรณ์ แต่ทำนายข้อมูลใหม่ได้แย่
+    ส่วน <strong>underfitting</strong> คือโมเดลเรียบง่ายเกินไปจนจับแม้แต่รูปแบบหลักของข้อมูลไม่ได้ ผิดทั้งชุดเทรนและชุดใหม่
+    ซิมด้านล่างสร้างข้อมูลจากเส้นโค้งที่รู้คำตอบ (เส้นประสีเทา) แล้วเติม noise และให้โมเดลพหุนามที่ซับซ้อนต่างกันมาฟิต
+  </p>
+
+  <!-- ---------- ซิม 4.3 ---------- -->
+  <div class="sim" id="s43">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 4.3 ความซับซ้อนของโมเดล: น้อยไป พอดี มากไป</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองเลื่อน degree จาก 1 ไปถึง 11 แล้วสังเกตว่าเส้น train error (น้ำเงิน) ลดลงตลอด แต่เส้น val error (ส้ม) ลดลงแล้วกลับขึ้น จากนั้นเปลี่ยนเป็น 40 จุดแล้วลองใหม่</p>
+    <div class="controls">
+      <label>degree ของพหุนาม <input type="range" id="s43_d" min="0" max="11" step="1"> <span class="mono" id="s43_dv"></span></label>
+    </div>
+    <div class="controls">
+      จำนวนข้อมูลเทรน:
+      <button data-n43="12">12 จุด</button>
+      <button data-n43="40">40 จุด</button>
+      <label><input type="checkbox" id="s43_true" checked> แสดงเส้นโค้งจริง</label>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col" style="flex-basis:340px">
+        <canvas id="s43_fit" width="400" height="280" style="width:100%"></canvas>
+        <p class="small muted" style="margin:0">● จุดดำ = train · ○ จุดส้ม = val (โมเดลไม่เคยเห็น) · เส้นน้ำเงิน = โมเดล</p>
+      </div>
+      <div class="sim-col" style="flex-basis:260px">
+        <canvas id="s43_err" width="300" height="280" style="width:100%"></canvas>
+      </div>
+    </div>
+    <div class="sim-out" id="s43_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s43_see">
+        <li>degree 0–1 (เส้นตรง) เป็น <strong>underfitting</strong>: error สูงทั้ง train และ val เพราะเส้นตรงงอตามเส้นโค้งไม่ได้</li>
+        <li>degree 3–4 <strong>พอดี</strong> (12 จุด): val error ต่ำสุดราว 0.078 ใกล้กับระดับ noise ที่ใส่ไว้ (0.25² = 0.0625) ซึ่งเป็นค่าต่ำสุดที่เป็นไปได้ เพราะ noise คาดเดาไม่ได้</li>
+        <li>12 จุด degree 5 ขึ้นไป: train error ยังลดต่อ แต่ val error กลับสูงขึ้น 2–5 เท่า และที่ degree 9–11 สูงกว่าจุดดีที่สุด 13–38 เท่า degree 11 มีค่าให้ปรับ 12 ตัวเท่าจำนวนจุด เส้นจึงผ่านจุดเทรน <em>ทุกจุด</em> (train error ≈ 0) แต่สะบัดแรงระหว่างจุด นี่คือ <strong>overfitting</strong> โมเดลจำ noise แทนที่จะเรียนรูปร่างจริง</li>
+        <li>40 จุด: degree 3 ถึง 11 ได้ val error ใกล้เคียงกันหมด แม้ degree 11 ก็สูงกว่าจุดดีที่สุดเพียงราว 1.1 เท่า เพราะจุดที่หนาแน่นไม่เปิดช่องให้เส้นสะบัด <strong>ข้อมูลมากขึ้นคือยาแก้ overfitting ที่ดีที่สุด</strong></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>สัญญาณบนกราฟตอนเทรนจริง</h3>
+  <p>
+    ตอนเทรนเครือข่ายจริงเราไม่ได้เปลี่ยน degree แต่โมเดลค่อย ๆ "ซับซ้อนขึ้น" ตามจำนวน epoch: ช่วงแรกจับรูปแบบหลัก ช่วงหลังเริ่มจำรายละเอียดยิบย่อยของชุดเทรน
+    สัญญาณ overfitting จึงเห็นได้บนกราฟ loss ตามเวลา ซิมด้านล่างเทรนเครือข่าย 1 ชั้นซ่อน (40 นิวรอน, SiLU, Adam) ด้วย backpropagation กับข้อมูลชุดเดียวกับซิม 4.3
+  </p>
+
+  <!-- ---------- ซิม 4.4 ---------- -->
+  <div class="sim" id="s44">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 4.4 กราฟ loss ตามเวลาเทรน และ best.pt</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "เทรน" กับข้อมูล 12 จุดแล้วสังเกตจุดที่ val loss ต่ำสุด (เส้นเขียว) เทียบกับตอนจบ จากนั้นเปิด early stopping แล้วเทรนใหม่ และลองกับ 40 จุด</p>
+    <div class="controls">
+      จำนวนข้อมูลเทรน:
+      <button data-n44="12">12 จุด</button>
+      <button data-n44="40">40 จุด</button>
+      <label><input type="checkbox" id="s44_es"> early stopping (patience = 300 epoch)</label>
+    </div>
+    <div class="controls">
+      <button id="s44_run">▶ เทรน</button>
+    </div>
+    <div class="sim-row">
+      <div class="sim-col" style="flex-basis:300px">
+        <canvas id="s44_fit" width="360" height="250" style="width:100%"></canvas>
+      </div>
+      <div class="sim-col" style="flex-basis:300px">
+        <canvas id="s44_loss" width="360" height="250" style="width:100%"></canvas>
+      </div>
+    </div>
+    <div class="sim-out" id="s44_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s44_see">
+        <li>12 จุด: ช่วงแรก train loss และ val loss ลดลงพร้อมกัน (โมเดลเรียนรูปร่างหลัก) จากนั้น train loss ยังลดต่อจาก 0.065 เหลือ 0.004 แต่ val loss กลับเพิ่มจาก 0.089 เป็น 0.23 เส้นโค้งเริ่มคดเคี้ยวเพื่อผ่านจุดเทรนให้ได้มากที่สุด</li>
+        <li>เส้นแนวตั้งสีเขียวคือ epoch ที่ val loss ต่ำสุด ซึ่งเกิดขึ้นเร็วมาก (epoch 330 จาก 4,000) Ultralytics เก็บน้ำหนัก ณ จุดแบบนี้เป็น <code>best.pt</code> แม้จะเทรนต่อไปจนจบ</li>
+        <li>เปิด early stopping (12 จุด): การเทรนหยุดเองที่ epoch 630 หลังจาก val loss ไม่ดีขึ้นติดกัน 300 epoch ประหยัดเวลาได้ราว 84% โดยไม่เสียโมเดลที่ดีที่สุด (Ultralytics ใช้ <code>patience = 100</code> epoch)</li>
+        <li>40 จุด: val loss ไม่กลับขึ้นเลยจนจบ 4,000 epoch (ราว 0.080 ตลอดช่วงหลัง) และเส้นโค้งที่ได้ใกล้เส้นจริงกว่ามาก ถ้าเปิด early stopping จะหยุดราว epoch 1,490 เพราะ val loss แทบไม่เปลี่ยนแล้ว ไม่ใช่เพราะแย่ลง</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+  <table>
+    <tr><th>สิ่งที่เห็นบนกราฟ</th><th>การวินิจฉัย</th><th>สิ่งที่ลองทำ</th></tr>
+    <tr><td>train loss สูง val loss สูง ทั้งคู่ลดช้า</td><td>underfitting</td><td>โมเดลใหญ่ขึ้น (เช่น n → s), เทรนนานขึ้น, ตรวจ learning rate</td></tr>
+    <tr><td>train loss ลด val loss ลด ใกล้กัน</td><td>กำลังเรียนดี</td><td>เทรนต่อ</td></tr>
+    <tr><td>train loss ยังลด แต่ val loss เริ่มขึ้น (หรือ mAP ของ val เริ่มลง)</td><td>overfitting</td><td>เพิ่มข้อมูล, เพิ่ม augmentation, ใช้ pretrained, หยุดเร็วขึ้น (best.pt / patience), weight decay</td></tr>
+  </table>
+  </div>
+
+  <h2>4.5 Data Augmentation: สร้างข้อมูลใหม่จากข้อมูลเดิม</h2>
+  <p>
+    เมื่อข้อมูลมากขึ้นช่วยลด overfitting ได้ดีที่สุด แต่การหาภาพและวาดเฉลยเพิ่มมีต้นทุนสูง วิธีที่ถูกกว่าคือ <strong>data augmentation</strong>
+    คือดัดแปลงภาพเดิมแบบสุ่มทุกครั้งที่ป้อนเข้าโมเดล เช่น กลับซ้ายขวา ย่อขยาย เลื่อน ปรับสีและความสว่าง
+    แอปเปิลที่ถูกกลับซ้ายขวาก็ยังเป็นแอปเปิล โมเดลจึงต้องเรียน "ความเป็นแอปเปิล" แทนที่จะจำว่าแอปเปิลอยู่ตรงพิกเซลไหน
+  </p>
+  <ul>
+    <li><strong>เฉลยต้องเปลี่ยนตามภาพเสมอ</strong>: ถ้าภาพถูกกลับซ้ายขวา กรอบและ polygon ของวัตถุก็ต้องกลับด้วย</li>
+    <li>ทำกับ <strong>ชุด train เท่านั้น</strong> ใน source ของ Ultralytics ชุด val ถูกสร้างด้วย <code>augment=False</code> (ใช้แค่ letterbox)</li>
+    <li>ภาพเดิมแต่ละภาพจึงหน้าตาไม่ซ้ำกันเลยในแต่ละ epoch</li>
+  </ul>
+  <div class="table-wrap">
+  <table>
+    <tr><th>ค่าเริ่มต้นใน Ultralytics 8.4.2</th><th>ความหมาย (ตรวจจาก <code>data/augment.py</code>)</th></tr>
+    <tr><td><code>fliplr = 0.5</code></td><td>โอกาส 50% ที่จะกลับภาพซ้าย↔ขวา (<code>flipud = 0</code> ไม่กลับบน↓ล่าง)</td></tr>
+    <tr><td><code>scale = 0.5</code></td><td>ย่อขยายสุ่มระหว่าง ×0.5 ถึง ×1.5</td></tr>
+    <tr><td><code>translate = 0.1</code></td><td>เลื่อนภาพสุ่มไม่เกิน ±10% ของขนาดภาพ ทั้งแนวนอนและแนวตั้ง พื้นที่ที่ว่างเติมด้วยสีเทา 114</td></tr>
+    <tr><td><code>hsv_h = 0.015</code></td><td>หมุนสี (hue) สุ่มไม่เกิน ±0.015 ของวงสี = ±5.4°</td></tr>
+    <tr><td><code>hsv_s = 0.7</code></td><td>คูณความสดของสี (saturation) สุ่มระหว่าง ×0.3 ถึง ×1.7</td></tr>
+    <tr><td><code>hsv_v = 0.4</code></td><td>คูณความสว่าง (value) สุ่มระหว่าง ×0.6 ถึง ×1.4</td></tr>
+    <tr><td><code>mosaic = 1.0</code></td><td>นำ 4 ภาพมาต่อกันเป็นภาพเดียวทุกครั้ง และปิดใน 10 epoch สุดท้าย (<code>close_mosaic = 10</code>) รายละเอียดในบทที่ 11</td></tr>
+    <tr><td><code>degrees = 0</code>, <code>mixup = 0</code>, <code>copy_paste = 0</code></td><td>หมุนภาพ, ผสมภาพ, คัดลอกวัตถุ: <em>ปิด</em> โดยค่าเริ่มต้น</td></tr>
+  </table>
+  </div>
+
+  <!-- ---------- ซิม 4.5 ---------- -->
+  <div class="sim" id="s45">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 4.5 ภาพเดียว หน้าตาไม่ซ้ำในแต่ละ epoch</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองกด "สุ่มใหม่" หลาย ๆ ครั้ง แล้วสังเกตว่ากรอบสีชมพูรอบแอปเปิลแดงขยับตามภาพไปด้วยทุกครั้ง จากนั้นปิด/เปิดทีละกลุ่มเพื่อดูผลของแต่ละแบบ</p>
+    <div class="controls">
+      <label><input type="checkbox" id="s45_geo" checked> ย่อขยาย + เลื่อน</label>
+      <label><input type="checkbox" id="s45_hsv" checked> สี (HSV)</label>
+      <label><input type="checkbox" id="s45_flip" checked> กลับซ้ายขวา</label>
+      <button id="s45_new">🎲 สุ่มใหม่ (epoch ถัดไป)</button>
+    </div>
+    <div class="aug-grid" id="s45_grid"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>ภาพที่ถูกย่อ (ต่ำกว่า ×1) มีขอบสีเทา 114 รอบ ส่วนภาพที่ขยายเกิน ×1 ถูกตัดขอบออก ผลไม้ที่อยู่ริมภาพ (กล้วย องุ่น) อาจหลุดขอบไปบางส่วน โมเดลจึงได้ฝึกกับวัตถุที่ถูกตัดขอบและวัตถุหลายขนาดด้วย</li>
+        <li>hue เปลี่ยนได้แค่ ±5.4° แอปเปิลแดงจึงยังแดง (ถ้าหมุนสีมาก ๆ แอปเปิลแดงอาจกลายเป็นสีเขียว ซึ่งจะสอนผิด) แต่ความสดและความสว่างเปลี่ยนได้มาก เหมือนถ่ายภาพในแสงต่าง ๆ</li>
+        <li>ภาพทั้ง 7 มาจากภาพเดียวกับเฉลยชุดเดียวกัน แต่สำหรับโมเดลแล้วตัวเลขพิกเซลต่างกันทั้งหมด</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>4.6 Transfer Learning: ไม่ต้องเริ่มจากศูนย์</h2>
+  <p>
+    การเทรนโมเดลจากค่าสุ่มต้องใช้ภาพจำนวนมหาศาล แต่ความรู้ระดับล่าง เช่น ขอบ มุม พื้นผิว รูปทรงกลม ใช้ได้กับภาพแทบทุกประเภท
+    <strong>Transfer learning</strong> คือการเริ่มจาก weight ที่เทรนกับชุดข้อมูลใหญ่มาแล้ว แล้วเทรนต่อกับข้อมูลของเรา (เรียกว่า fine-tuning)
+  </p>
+  <div class="table-wrap">
+  <table>
+    <tr><th>เริ่มจาก</th><th>weight ตอนเริ่ม</th><th>เหมาะกับ</th></tr>
+    <tr><td><code>YOLO("yolo11n-seg.pt")</code></td><td>เทรนกับ COCO (80 คลาส) มาแล้ว</td><td>เกือบทุกงาน โดยเฉพาะเมื่อมีภาพน้อย</td></tr>
+    <tr><td><code>YOLO("yolo11n-seg.yaml")</code></td><td>สุ่มทั้งหมด มีแค่โครงสร้าง</td><td>งานวิจัยโครงสร้างใหม่ หรือมีข้อมูลมหาศาลที่ต่างจาก COCO มาก</td></tr>
+  </table>
+  </div>
+  <p>
+    ถ้าชุดข้อมูลของเรามีจำนวนคลาสไม่เท่ากับ 80 เช่น ผลไม้ 3 คลาส บางส่วนของ Head จะมีขนาดไม่ตรงกับไฟล์ .pt และถูกเริ่มจากค่าสุ่มแทน
+    จากการรันจริงด้วยฟังก์ชันเดียวกับที่ Ultralytics ใช้โหลด weight (<code>tools/ch4_transfer.py</code>) ได้ผลดังนี้
+  </p>
+
+  <div class="sim" id="tl">
+    <div class="sim-head"><h3>รูปที่ 4.2 (ข้อมูลจริง) weight ที่โอนมาได้ และผลของการเริ่มจาก .pt เทียบกับ .yaml</h3></div>
+    <div class="controls">
+      จำนวนคลาสของงานใหม่:
+      <button data-nc="3">3 คลาส (ผลไม้)</button>
+      <button data-nc="80">80 คลาส (เท่า COCO)</button>
+    </div>
+    <canvas id="tl_bar" width="640" height="70" style="width:100%"></canvas>
+    <div class="sim-out" id="tl_out">กำลังโหลด data/ch4_transfer.json …</div>
+    <p class="small" style="margin:12px 0 2px"><strong>เทรน coco8-seg 30 epoch ด้วยค่าเริ่มต้นเหมือนกันทุกอย่าง ต่างกันแค่จุดเริ่ม</strong></p>
+    <div class="controls">
+      ค่าที่ดู:
+      <button data-met="metrics/mAP50(B)">mAP50 ของกล่อง (val)</button>
+      <button data-met="metrics/mAP50-95(M)">mAP50-95 ของ mask (val)</button>
+      <button data-met="val/seg_loss">val seg_loss</button>
+    </div>
+    <canvas id="tl_chart" width="640" height="220" style="width:100%"></canvas>
+    <div class="sim-out" id="tl_out2"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul>
+        <li>งาน 3 คลาส: แถบเกือบทั้งแถบเป็นสีเขียว ส่วนที่ต้องเรียนใหม่จริง ๆ มีแค่ 44,425 ตัวจากเกือบ 2.9 ล้าน ความรู้เรื่องขอบ รูปทรง และการหาตำแหน่งวัตถุติดมาครบ</li>
+        <li>เส้นสีเขียว (.pt) ได้ mAP50 ของกล่องราว 0.86 ตั้งแต่ epoch แรก ส่วนเส้นสีแดง (.yaml) เป็น 0 ตลอด 30 epoch</li>
+        <li>ดู val seg_loss ของ .pt: ลดลงเล็กน้อยช่วง 6 epoch แรก (2.56 → 2.54) แล้วเพิ่มขึ้นเรื่อย ๆ จนถึง 2.64 และ mAP50-95 ของ mask ลดจาก 0.57 เหลือ 0.53 ทั้งที่เทรนต่อ นี่คือสัญญาณ overfitting เล็ก ๆ จากการเทรนกับภาพแค่ 4 ภาพซ้ำ ๆ</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="box warn">
+    <span class="box-title">⚠ อย่าเพิ่งดีใจกับตัวเลขของ .pt</span>
+    ภาพทั้ง 8 ภาพใน coco8-seg คือ <em>8 ภาพแรกของ COCO train2017</em> (ตามที่เขียนในไฟล์ <code>coco8-seg.yaml</code>) และ yolo11n-seg.pt ก็เทรนกับ COCO train2017 มาแล้ว
+    ภาพ val ทั้ง 4 ภาพจึงเป็นภาพที่โมเดลเคยเห็นพร้อมเฉลยมาก่อน คะแนนสูงตั้งแต่ epoch แรกส่วนหนึ่งจึงมาจาก "จำได้" ไม่ใช่ความเก่งล้วน ๆ
+    นี่คือตัวอย่างจริงของปัญหาในหัวข้อถัดไป ส่วน .yaml ได้ 0 เพราะ 30 iteration ด้วย learning rate 0.000119 น้อยเกินกว่าที่โมเดลสุ่มจะเรียนอะไรได้
+  </div>
+
+  <details class="think">
+    <summary>ดูคำสั่งเทรนสองแบบ (สั้น ๆ)</summary>
+<pre><code>from ultralytics import YOLO
+YOLO("yolo11n-seg.pt").train(data="coco8-seg.yaml", epochs=30)    <span class="cmt"># เริ่มจาก COCO</span>
+YOLO("yolo11n-seg.yaml").train(data="coco8-seg.yaml", epochs=30)  <span class="cmt"># เริ่มจากสุ่ม</span></code></pre>
+    ตอนเริ่มเทรนจาก .pt จะเห็นบรรทัด <code>Transferred 561/561 items from pretrained weights</code> ใน log
+  </details>
+
+  <h2>4.7 Data Leakage: ข้อสอบรั่ว</h2>
+  <p>
+    <strong>Data leakage</strong> คือการที่ข้อมูลในชุด val หรือ test "รั่ว" ไปอยู่ในชุด train ทั้งตรง ๆ หรือในรูปที่เกือบเหมือนกัน
+    ผลคือคะแนน val สูงเกินจริง เราเชื่อว่าโมเดลเก่ง แต่พอใช้งานจริงกับภาพใหม่กลับแย่
+  </p>
+  <p>สาเหตุที่พบบ่อยในงานภาพ</p>
+  <ul>
+    <li><strong>เฟรมวิดีโอหรือภาพถ่ายต่อเนื่อง</strong>: เฟรมที่ติดกันแทบเหมือนกันทุกพิกเซล ถ้าสุ่มแบ่งทีละภาพ เฟรมที่ 37 อาจอยู่ใน val ขณะที่เฟรม 36 และ 38 อยู่ใน train</li>
+    <li><strong>วัตถุชิ้นเดียวกันถ่ายหลายมุม</strong> หรือภาพซ้ำที่ถูกบันทึกหลายไฟล์</li>
+    <li><strong>ทำ augmentation ก่อนแบ่งชุด</strong>: ภาพที่กลับซ้ายขวาไปอยู่ใน train แต่ภาพต้นฉบับไปอยู่ใน val</li>
+    <li><strong>ใช้ pretrained ที่เคยเห็นภาพ val</strong> แบบกรณี coco8-seg ด้านบน</li>
+  </ul>
+
+  <!-- ---------- ซิม 4.6 ---------- -->
+  <div class="sim" id="s46">
+    <div class="sim-head"><h3>ซิมมูเลชั่น 4.6 แบ่งภาพจากวิดีโอ 100 เฟรม</h3><button class="reset" data-act="reset">รีเซ็ต</button></div>
+    <p class="sim-goal">ลองเลือกวิธีแบ่งทีละแบบ แล้วนับกรอบสีแดง (ภาพ val ที่มีภาพเกือบซ้ำอยู่ใน train) คลิกที่ภาพ val เพื่อดูคู่ที่เกือบซ้ำกัน</p>
+    <div class="controls">
+      วิธีแบ่ง:
+      <button data-split="random">สุ่มทีละภาพ</button>
+      <button data-split="block">แบ่งเป็นช่วง (20 เฟรมท้าย)</button>
+      <button data-split="group">แบ่งตามฉาก</button>
+      <button id="s46_new">🎲 สุ่มใหม่</button>
+    </div>
+    <canvas id="s46_cv" width="640" height="470" style="width:100%;cursor:pointer"></canvas>
+    <p class="small muted" style="margin:2px 0 6px">
+      ภาพจากกล้องที่ค่อย ๆ แพนผ่าน 10 ฉาก (แถบสีใต้ภาพบอกว่าเป็นฉากไหน) ถือว่า "เกือบซ้ำ" เมื่ออยู่ฉากเดียวกันและห่างกันไม่เกิน 3 เฟรม ·
+      <span class="legend-dot" style="background:#c9c3b8"></span>train
+      <span class="legend-dot" style="background:#3f9d5a"></span>val ปลอดภัย
+      <span class="legend-dot" style="background:#d6453d"></span>val รั่ว
+    </p>
+    <div class="sim-out" id="s46_out"></div>
+    <div class="box see">
+      <span class="box-title">👀 สิ่งที่ควรสังเกต</span>
+      <ul id="s46_see">
+        <li>สุ่มทีละภาพ: ภาพ val ทั้ง 20 ภาพมีเพื่อนบ้านที่ห่างไม่เกิน 3 เฟรมอยู่ใน train (ลองกดสุ่มใหม่ก็ยัง 20/20) โมเดลที่จำภาพเทรนได้จะตอบ val ถูกเหมือนลอกข้อสอบ คะแนน val จึงบอกอะไรไม่ได้เลย</li>
+        <li>แบ่งเป็นช่วง: รั่วแค่ 3 ภาพตรงรอยต่อ (เฟรม 80–82 อยู่ฉากเดียวกับเฟรม 79 ที่อยู่ใน train) ดีกว่ามาก แต่ยังไม่ศูนย์</li>
+        <li>แบ่งตามฉาก: ทุกเฟรมของฉากเดียวกันอยู่ชุดเดียวกัน รั่ว 0 ภาพเสมอ ไม่ว่าจะสุ่มใหม่กี่ครั้ง นี่คือวิธีที่ถูกต้อง (เรียกว่า group split)</li>
+      </ul>
+    </div>
+  </div>
+  <div class="box tip">
+    <span class="box-title">💡 หลักป้องกัน data leakage</span>
+    <ol>
+      <li>แบ่งชุดข้อมูล <strong>ก่อน</strong> ทำอย่างอื่นทั้งหมด และแบ่งตาม "กลุ่ม" ที่ภาพในกลุ่มคล้ายกัน เช่น วิดีโอ, วันที่ถ่าย, สถานที่, วัตถุชิ้นเดียวกัน</li>
+      <li>ตรวจหาและลบภาพซ้ำหรือเกือบซ้ำข้ามชุด</li>
+      <li>ถ้าคะแนน val สูงผิดปกติ ให้สงสัยไว้ก่อน แล้วลองทดสอบกับภาพที่ถ่ายใหม่จริง ๆ</li>
+    </ol>
+  </div>
+
+  <!-- ===================== 5. อยู่ตรงไหน ===================== -->
+  <h2>🔗 อยู่ตรงไหนใน YOLO11-seg</h2>
+  <div id="pipe"></div>
+  <p>
+    เนื้อหาบทนี้คือทุกอย่างที่เกิดขึ้นเมื่อสั่ง <code>model.train(...)</code>
+    การแบ่ง train/val/test และ augmentation เกิดที่ขั้นภาพก่อนเข้าโมเดล (augmentation ทำร่วมกับ letterbox)
+    จากนั้นทุก iteration ภาพหนึ่ง batch วิ่ง forward ผ่าน Backbone → Neck → Head ได้ loss แล้ว backpropagation ส่ง gradient ย้อนกลับผ่าน Head → Neck → Backbone เพื่อปรับ weight ทุกตัว
+    ส่วนการเลือกว่าจะเริ่มจาก <code>.pt</code> หรือ <code>.yaml</code> คือการเลือกค่าเริ่มต้นของ weight ทุกตัวในสามส่วนนี้
+  </p>
+
+  <!-- ===================== 6. สรุป ===================== -->
+  <h2>สรุปท้ายบท</h2>
+  <ul>
+    <li>Forward pass คำนวณจากซ้ายไปขวาจนได้ loss ส่วน backward pass (backpropagation) ส่ง gradient ย้อนกลับ โดยแต่ละโหนดคูณความชันเฉพาะที่ของตัวเอง (กฎลูกโซ่) จึงได้ gradient ของทุก weight ในการย้อนรอบเดียว</li>
+    <li>iteration ต่อ epoch = ⌈จำนวนภาพ / batch⌉ และทุก epoch จะสุ่มลำดับใหม่ Ultralytics สะสม gradient ให้ครบราว 64 ภาพ (nbs) ก่อนปรับ weight</li>
+    <li>Train ใช้ปรับ weight, val ใช้เลือก epoch ที่ดีที่สุดและตั้งค่า (Ultralytics บันทึกเป็น best.pt), test ใช้วัดครั้งเดียวตอนจบ</li>
+    <li>Overfitting: train loss ลดต่อแต่ val loss เพิ่ม เพราะโมเดลจำ noise ส่วน underfitting: ทั้งสองสูง</li>
+    <li>แก้ overfitting ด้วยข้อมูลเพิ่ม, augmentation (ทำเฉพาะ train และเฉลยต้องเปลี่ยนตาม), pretrained weight และ early stopping</li>
+    <li>เริ่มจาก yolo11n-seg.pt ได้ความรู้จาก COCO มาเกือบทั้งหมด (งาน 3 คลาสโอนได้ 98.4% ของ parameter ยกเว้นสาขาคลาสของ Head) ส่วน .yaml เริ่มจากสุ่ม</li>
+    <li>Data leakage ทำให้คะแนนสูงเกินจริง ป้องกันด้วยการแบ่งตามกลุ่ม (เช่น ตามวิดีโอหรือฉาก) ก่อนทำอย่างอื่น</li>
+  </ul>
+
+  <!-- ===================== 7. แบบทดสอบ ===================== -->
+  <h2>แบบทดสอบท้ายบท</h2>
+  <p class="small muted">กดเลือกคำตอบเพื่อดูเฉลยและคำอธิบายทันที</p>
+  <div id="quiz"></div>
+
+  <!-- ===================== 8. อ้างอิง ===================== -->
+  <h2>เอกสารอ้างอิง</h2>
+  <ul class="refs">
+    <li>Goodfellow, I., Bengio, Y., &amp; Courville, A. (2016). <em>Deep learning</em>. MIT Press. https://www.deeplearningbook.org</li>
+    <li>Jocher, G., &amp; Qiu, J. (2024). <em>Ultralytics YOLO11</em> [Computer software]. Ultralytics. https://github.com/ultralytics/ultralytics</li>
+    <li>Lin, T.-Y., Maire, M., Belongie, S., Hays, J., Perona, P., Ramanan, D., Dollár, P., &amp; Zitnick, C. L. (2014). Microsoft COCO: Common objects in context. In <em>Computer Vision – ECCV 2014</em> (pp. 740–755). Springer. https://doi.org/10.1007/978-3-319-10602-1_48</li>
+    <li>Rumelhart, D. E., Hinton, G. E., &amp; Williams, R. J. (1986). Learning representations by back-propagating errors. <em>Nature, 323</em>(6088), 533–536. https://doi.org/10.1038/323533a0</li>
+    <li>Ultralytics. (n.d.). <em>Ultralytics YOLO docs</em>. https://docs.ultralytics.com</li>
+    <li>Zhang, A., Lipton, Z. C., Li, M., &amp; Smola, A. J. (2023). <em>Dive into deep learning</em>. Cambridge University Press. https://d2l.ai</li>
+  </ul>
+
+  <footer>
+    ข้อเท็จจริงของ YOLO11 ในบทนี้ตรวจกับ <strong>ultralytics 8.4.2</strong>: อ่าน source <code>cfg/default.yaml</code>, <code>engine/trainer.py</code> (วงจรเทรน, accumulate, warmup),
+    <code>data/build.py</code>, <code>data/augment.py</code> (v8_transforms, RandomPerspective, RandomHSV, RandomFlip), <code>nn/tasks.py</code> (load), <code>nn/modules/head.py</code>,
+    <code>utils/metrics.py</code> (fitness), <code>utils/torch_utils.py</code> (EarlyStopping) และรัน <code>tools/ch4_transfer.py</code> → <code>data/ch4_transfer.json</code>
+    · <a href="../chapter3/">← บทที่ 3</a> · <a href="../">สารบัญ</a> · <a href="../chapter5/">บทที่ 5 Convolution →</a>
+  </footer>
+</main>
+
+<script src="../assets/common.js"></script>
+<script>
+const f2 = (v, n = 2) => (Math.abs(v) < 5e-10 ? 0 : v).toFixed(n);
+const $ = id => document.getElementById(id);
+const gauss = r => { let u = 0; while (!u) u = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r()); };
+const fmtInt = v => Math.round(v).toLocaleString('en-US');
+
+// กราฟหลายเส้น แกน x เชิงเส้น แกน y เชิงเส้นหรือ log
+// series: [{ xs, ys, color, dash }], opt: { log, xmax, xlabel, ylabel, ymin, ymax, vline: { x, color, label } }
+function drawCurves(cv, series, opt) {
+  const { ctx, W, H } = setupCanvas(cv);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  const L = 46, B = 30, T = 10, R = 10;
+  ctx.strokeStyle = '#999'; ctx.lineWidth = 1; ctx.strokeRect(L, T, W - L - R, H - T - B);
+  const all = series.flatMap(s => s.ys).filter(v => isFinite(v) && (!opt.log || v > 0));
+  if (!all.length) return;
+  const tr = v => (opt.log ? Math.log10(Math.max(v, 1e-9)) : v);
+  let lo = opt.ymin !== undefined ? tr(opt.ymin) : Math.min(...all.map(tr));
+  let hi = opt.ymax !== undefined ? tr(opt.ymax) : Math.max(...all.map(tr));
+  if (hi - lo < 1e-9) { lo -= 0.5; hi += 0.5; }
+  const xmax = opt.xmax || Math.max(...series.flatMap(s => s.xs), 1), xmin = opt.xmin || 0;
+  const sx = x => L + (x - xmin) / (xmax - xmin) * (W - L - R);
+  const sy = v => T + (hi - tr(v)) / (hi - lo) * (H - T - B);
+  ctx.fillStyle = '#666'; ctx.font = '10px Consolas, monospace'; ctx.textAlign = 'right';
+  const lab = v => (opt.log ? Math.pow(10, v).toPrecision(2) : (+v.toFixed(3)).toString());
+  ctx.fillText(lab(hi), L - 3, T + 9); ctx.fillText(lab(lo), L - 3, H - B);
+  ctx.textAlign = 'center'; ctx.font = '11px Sarabun, sans-serif';
+  ctx.fillText(xmin, L, H - B + 13); ctx.fillText(xmax, W - R, H - B + 13);
+  if (opt.xlabel) ctx.fillText(opt.xlabel, (L + W - R) / 2, H - 4);
+  if (opt.vline) {
+    ctx.strokeStyle = opt.vline.color; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(sx(opt.vline.x), T); ctx.lineTo(sx(opt.vline.x), H - B); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = opt.vline.color; ctx.textAlign = sx(opt.vline.x) > W - 90 ? 'right' : 'left';
+    ctx.fillText(opt.vline.label, sx(opt.vline.x) + (ctx.textAlign === 'left' ? 4 : -4), T + 12);
+  }
+  ctx.save(); ctx.beginPath(); ctx.rect(L, T, W - L - R, H - T - B); ctx.clip();
+  for (const s of series) {
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width || 2; ctx.setLineDash(s.dash || []);
+    ctx.beginPath();
+    s.ys.forEach((v, i) => { const x = sx(s.xs[i]), y = sy(v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke(); ctx.setLineDash([]);
+    if (s.dots) { ctx.fillStyle = s.color; s.ys.forEach((v, i) => { ctx.beginPath(); ctx.arc(sx(s.xs[i]), sy(v), 2.5, 0, Math.PI * 2); ctx.fill(); }); }
+  }
+  ctx.restore();
+  return { sx, sy };
+}
+
+/* =========================================================
+   ซิม 4.1 กราฟคำนวณ
+   ========================================================= */
+(function () {
+  const root = $('s41');
+  const silu = z => z * logistic(z), dsilu = z => { const s = logistic(z); return s * (1 + z * (1 - s)); };
+  // แต่ละขั้น: t = ชนิด, p = ชื่อ parameter, out = ชื่อเอาต์พุต
+  const MODES = {
+    one: { stages: [{ t: 'in', out: 'x' }, { t: 'mul', p: 'w', out: 'u' }, { t: 'add', p: 'b', out: 'ŷ' }, { t: 'loss', out: 'L' }],
+           init: { x: 0.8, w: 0.5, b: 0.1, y: 1 } },
+    two: { stages: [{ t: 'in', out: 'x' }, { t: 'mul', p: 'w₁', out: 'u₁' }, { t: 'add', p: 'b₁', out: 'z₁' }, { t: 'silu', out: 'h' },
+                    { t: 'mul', p: 'w₂', out: 'u₂' }, { t: 'add', p: 'b₂', out: 'ŷ' }, { t: 'loss', out: 'L' }],
+           init: { x: 0.8, 'w₁': 1.0, 'b₁': -0.5, 'w₂': 0.8, 'b₂': 0.2, y: 1 } },
+  };
+  let st;
+  const S = () => MODES[st.mode].stages;
+
+  function forward(P) {
+    const v = [P.x];
+    S().slice(1).forEach((s, k) => {
+      const a = v[k];
+      v.push(s.t === 'mul' ? a * P[s.p] : s.t === 'add' ? a + P[s.p] : s.t === 'silu' ? silu(a) : (a - P.y) ** 2);
+    });
+    return v;
+  }
+  function local(s, a, P) { return s.t === 'mul' ? P[s.p] : s.t === 'add' ? 1 : s.t === 'silu' ? dsilu(a) : 2 * (a - P.y); }
+  function backward(P, v) {
+    const n = S().length, g = new Array(n).fill(0), pg = {};
+    g[n - 1] = 1;
+    for (let i = n - 1; i >= 1; i--) {
+      const s = S()[i];
+      g[i - 1] = local(s, v[i - 1], P) * g[i];
+      if (s.t === 'mul') pg[s.p] = v[i - 1] * g[i];
+      if (s.t === 'add') pg[s.p] = g[i];
+    }
+    return { g, pg };
+  }
+
+  function svg() {
+    const stg = S(), n = stg.length, P = st.P, v = forward(P), { g, pg } = backward(P, v);
+    const gap = 112, X0 = 50, W = X0 * 2 + gap * n, H = 236, Y = 158, PY = 26;
+    const xs = i => X0 + gap * i;
+    const showV = i => i < st.fk, showG = j => st.bk >= 1 && j >= n - 1 - st.bk, showPG = i => st.bk >= 1 && i >= n - st.bk;
+    const cur = st.bk >= 1 ? n - st.bk : -1;   // โหนดที่เพิ่งประมวลผลขากลับ
+    const T = (x, y, s, o = {}) => `<text x="${x}" y="${y}" text-anchor="${o.a || 'middle'}" font-size="${o.fs || 13}" fill="${o.c || '#1f2933'}" font-weight="${o.w || 400}">${s}</text>`;
+    let out = `<svg viewBox="0 0 ${W} ${H}" style="min-width:${Math.round(W * 0.78)}px" font-family="Sarabun, Consolas, sans-serif">`;
+    out += `<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#888"/></marker></defs>`;
+    // เส้นเชื่อม + ค่า
+    for (let i = 0; i < n; i++) {
+      const x0 = xs(i) + 26, x1 = xs(i + 1) - 28, mx = (x0 + x1) / 2, name = stg[i].out;
+      out += `<line x1="${x0}" y1="${Y}" x2="${x1}" y2="${Y}" stroke="#888" stroke-width="2" marker-end="url(#ah)"/>`;
+      if (showV(i) && i < n - 1) out += T(mx, Y - 24, name, { c: '#1f5fbf', fs: 13 }) + T(mx, Y - 8, f2(v[i], 3), { c: '#1f5fbf', w: 700, fs: 14 });
+      if (showG(i) && i < n - 1) out += T(mx, Y + 21, '∂L/∂' + name, { c: '#d6453d', fs: 13 }) + T(mx, Y + 38, f2(g[i], 3), { c: '#d6453d', w: 700, fs: 14 });
+    }
+    // โหนด
+    stg.forEach((s, i) => {
+      const x = xs(i), hl = i === cur ? ' stroke="#ff00ff" stroke-width="3"' : ' stroke="#555" stroke-width="1.5"';
+      if (s.t === 'in') out += `<rect x="${x - 24}" y="${Y - 20}" width="48" height="40" rx="6" fill="#eef4fb"${hl}/>` + T(x, Y + 5, 'x', { fs: 16, w: 700 });
+      else if (s.t === 'loss') out += `<rect x="${x - 30}" y="${Y - 20}" width="60" height="40" rx="6" fill="#fdeeee"${hl}/>` + T(x, Y + 5, '(ŷ−y)²', { fs: 13, w: 700 });
+      else out += `<circle cx="${x}" cy="${Y}" r="24" fill="#fff"${hl}/>` + T(x, Y + (s.t === 'silu' ? 4 : 6), s.t === 'mul' ? '×' : s.t === 'add' ? '+' : 'SiLU', { fs: s.t === 'silu' ? 12 : 20, w: 700 });
+      // parameter ด้านบน
+      if (s.p || s.t === 'loss') {
+        const name = s.p || 'y', isY = !s.p;
+        out += `<rect x="${x - 38}" y="${PY}" width="76" height="30" rx="5" fill="${isY ? '#f3f1ec' : '#fdf6e3'}" stroke="${isY ? '#aaa' : '#d9a520'}"/>` +
+               T(x, PY + 20, `${name} = ${f2(P[name], 3)}`, { fs: 13, w: 700 }) +
+               `<line x1="${x}" y1="${PY + 30}" x2="${x}" y2="${Y - (s.t === 'loss' ? 22 : 26)}" stroke="#bbb" stroke-width="1.5" marker-end="url(#ah)"/>`;
+        if (!isY && showPG(i)) out += T(x + 6, PY + 52, `∂L/∂${name} = ${f2(pg[name], 3)}`, { c: '#d6453d', fs: 12, w: 700, a: 'start' });
+        if (isY) out += T(x + 6, PY + 52, 'เฉลย', { c: '#888', fs: 11, a: 'start' });
+      }
+    });
+    // ปลายทาง L
+    const xl = xs(n);
+    out += `<rect x="${xl - 24}" y="${Y - 20}" width="48" height="40" rx="6" fill="${showV(n - 1) ? '#fdeeee' : '#fff'}" stroke="#555"/>` + T(xl, Y + 5, 'L', { fs: 16, w: 700 });
+    if (showV(n - 1)) out += T(xl, Y - 28, f2(v[n - 1], 4), { c: '#1f5fbf', w: 700 });
+    if (showG(n - 1)) out += T(xl, Y + 40, '∂L/∂L = 1', { c: '#d6453d', fs: 12, w: 700 });
+    return out + '</svg>';
+  }
+
+  function stepText() {
+    const stg = S(), n = stg.length, P = st.P, v = forward(P), { g, pg } = backward(P, v);
+    if (st.msg) return st.msg;
+    if (st.bk === 0) {
+      if (st.fk < n) return `forward: คำนวณแล้ว ${st.fk} จาก ${n} ค่า กด "เดินหน้า" ต่อ`;
+      return `forward ครบแล้ว: L = <b>${f2(v[n - 1], 4)}</b> (ทำนาย ŷ = ${f2(v[n - 2], 3)} แต่เฉลย y = ${P.y}) ต่อไปกด "ย้อนกลับ" เพื่อหาว่าแต่ละค่าควรขยับทางไหน`;
+    }
+    const i = n - st.bk, s = stg[i], a = v[i - 1], inN = stg[i - 1].out, outN = s.out, gl = g[i];
+    let t = `<b>โหนดที่ ${i} (${s.t === 'mul' ? '×' + s.p : s.t === 'add' ? '+' + s.p : s.t === 'silu' ? 'SiLU' : 'loss'})</b>: ได้รับ ∂L/∂${outN} = ${f2(gl, 3)} จากทางขวา<br>`;
+    if (s.t === 'loss') t += `ความชันเฉพาะที่ ∂L/∂ŷ = 2(ŷ − y) = 2(${f2(a, 3)} − ${P.y}) = ${f2(2 * (a - P.y), 3)} → ∂L/∂ŷ = <b style="color:#d6453d">${f2(g[i - 1], 3)}</b> (ติดลบ = ควรเพิ่ม ŷ)`;
+    if (s.t === 'add') t += `ความชันเฉพาะที่ = 1 (อินพุตขยับเท่าไร เอาต์พุตขยับเท่านั้น) → ∂L/∂${inN} = 1 × ${f2(gl, 3)} = <b style="color:#d6453d">${f2(g[i - 1], 3)}</b> และ ∂L/∂${s.p} = 1 × ${f2(gl, 3)} = <b style="color:#d6453d">${f2(pg[s.p], 3)}</b>`;
+    if (s.t === 'mul') t += `∂${outN}/∂${inN} = ${s.p} = ${f2(P[s.p], 3)} → ∂L/∂${inN} = ${f2(P[s.p], 3)} × ${f2(gl, 3)} = <b style="color:#d6453d">${f2(g[i - 1], 3)}</b><br>` +
+                          `∂${outN}/∂${s.p} = ${inN} = ${f2(a, 3)} → ∂L/∂${s.p} = ${f2(a, 3)} × ${f2(gl, 3)} = <b style="color:#d6453d">${f2(pg[s.p], 3)}</b>`;
+    if (s.t === 'silu') t += `ความชันของ SiLU ที่ z₁ = ${f2(a, 3)} คือ σ(z₁)(1 + z₁(1 − σ(z₁))) = ${f2(dsilu(a), 3)} → ∂L/∂z₁ = ${f2(dsilu(a), 3)} × ${f2(gl, 3)} = <b style="color:#d6453d">${f2(g[i - 1], 3)}</b>`;
+    if (i === 1) {
+      const p0 = stg[1].p, d = 0.001, P2 = { ...P, [p0]: P[p0] + d }, L2 = forward(P2)[n - 1], L1 = v[n - 1];
+      t += `<br><br>✅ <b>ย้อนกลับครบแล้ว</b> ตรวจคำตอบด้วยการขยับจริง: เพิ่ม ${p0} จาก ${f2(P[p0], 3)} เป็น ${f2(P[p0] + d, 3)} → L เปลี่ยนจาก ${L1.toFixed(6)} เป็น ${L2.toFixed(6)} ` +
+           `→ (ผลต่าง) / 0.001 = <b>${((L2 - L1) / d).toFixed(3)}</b> เทียบกับ ∂L/∂${p0} จาก backprop = <b>${f2(pg[p0], 3)}</b>`;
+    }
+    return t;
+  }
+
+  function draw() {
+    $('s41_graph').innerHTML = svg();
+    $('s41_out').innerHTML = stepText();
+    root.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === st.mode));
+  }
+  function setMode(m) { st = { mode: m, P: { ...MODES[m].init }, fk: 1, bk: 0, msg: '' }; draw(); }
+  $('s41_fwd').addEventListener('click', () => {
+    st.msg = '';
+    if (st.bk > 0) { st.bk = 0; st.fk = 1; } else if (st.fk < S().length) st.fk++;
+    draw();
+  });
+  $('s41_bwd').addEventListener('click', () => {
+    st.msg = ''; const n = S().length;
+    if (st.fk < n) st.fk = n;                // ต้องมีค่าจาก forward ครบก่อน
+    else if (st.bk < n - 1) st.bk++;
+    draw();
+  });
+  $('s41_upd').addEventListener('click', () => {
+    const n = S().length, v = forward(st.P), { pg } = backward(st.P, v), L1 = v[n - 1];
+    const parts = Object.keys(pg).map(p => `${p}: ${f2(st.P[p], 3)} − 0.1 × (${f2(pg[p], 3)}) = ${f2(st.P[p] - 0.1 * pg[p], 3)}`);
+    Object.keys(pg).forEach(p => { st.P[p] -= 0.1 * pg[p]; });
+    const L2 = forward(st.P)[n - 1];
+    st.fk = n; st.bk = 0;
+    st.msg = `ปรับทุก weight ด้วย w ← w − η·∂L/∂w:<br><span class="mono small">${parts.join('<br>')}</span><br>` +
+             `forward ใหม่: L จาก ${f2(L1, 4)} → <b>${f2(L2, 4)}</b> ${L2 < L1 ? '(ลดลง ✓)' : ''} · กด "ย้อนกลับ" เพื่อหา gradient รอบใหม่`;
+    draw();
+  });
+  root.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+  root.querySelector('[data-act=reset]').addEventListener('click', () => setMode(st.mode));
+  setMode('one');
+})();
+
+/* =========================================================
+   ซิม 4.2 เครื่องคิดเลข iteration
+   ========================================================= */
+(function () {
+  const root = $('s42'), cv = $('s42_cv');
+  const PRE = { small: [50, 16, 3], coco8: [4, 16, 30], fruit: [1000, 16, 100], coco: [118287, 16, 100] };
+  const COL = ['#5b8fd1', '#e3a33b', '#3f9d5a', '#c45ab3', '#d6453d', '#4fb3bf', '#8a6d3b', '#7a7fd6'];
+  let pre = 'small';
+
+  function perm(n, seed) {
+    const r = rng(seed), a = Array.from({ length: n }, (_, i) => i);
+    for (let i = n - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  }
+  function draw() {
+    const N = Math.max(1, Math.floor(+$('s42_n').value || 1)), b = +$('s42_b').value, E = Math.max(1, Math.floor(+$('s42_e').value || 1));
+    const nb = Math.ceil(N / b), last = N - (nb - 1) * b, total = nb * E;
+    const acc = Math.max(Math.round(64 / b), 1), nw = Math.max(Math.round(3 * nb), 100);
+    // นับจำนวนครั้งที่ปรับ weight ตามกฎใน engine/trainer.py: ช่วง warmup จำนวนที่สะสมไล่จาก 1 ขึ้นไปถึง 64/batch
+    let updates = 0, lastOpt = -1, a = acc;
+    for (let ni = 0; ni < total; ni++) {
+      if (ni <= nw) a = Math.max(1, pyRound(1 + (64 / b - 1) * ni / nw));
+      if (ni - lastOpt >= a) { updates++; lastOpt = ni; }
+    }
+    const auto = Math.ceil(N / Math.max(b, 64)) * E, opt = auto > 10000 ? 'SGD (lr = 0.01)' : 'MuSGD (lr = 0.01/(4 + จำนวนคลาส))';
+    root.querySelectorAll('[data-pre]').forEach(x => x.classList.toggle('on', x.dataset.pre === pre));
+
+    const { ctx, W, H } = setupCanvas(cv);
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    ctx.font = '12px Sarabun, sans-serif'; ctx.textAlign = 'left'; ctx.fillStyle = '#444';
+    const rows = Math.min(E, 4);
+    if (N <= 60) {
+      const L = 64, gapB = 5, sq = Math.min(22, Math.floor((W - L - 6 - (nb - 1) * gapB) / N)), rh = Math.min(42, (H - 20) / rows);
+      ctx.fillText('แต่ละสี = 1 batch = 1 iteration', L, 13);
+      for (let e = 0; e < rows; e++) {
+        const y = 22 + e * rh, order = perm(N, 100 + e);
+        ctx.fillStyle = '#444'; ctx.fillText(`epoch ${e + 1}`, 4, y + sq / 2 + 4);
+        order.forEach((img, k) => {
+          const bi = Math.floor(k / b), x = L + k * sq + bi * gapB;
+          ctx.fillStyle = COL[bi % COL.length]; ctx.fillRect(x + 1, y, sq - 2, sq);
+          if (img === 0) { ctx.strokeStyle = '#000'; ctx.lineWidth = 2.5; ctx.strokeRect(x, y - 1, sq, sq + 2); }
+        });
+      }
+      if (E > rows) { ctx.fillStyle = '#888'; ctx.fillText(`… อีก ${E - rows} epoch`, 4, H - 4); }
+    } else {
+      ctx.fillText(`ภาพมาก (${fmtInt(N)} ภาพ) จึงวาดเป็นแถบ: 1 แถว = 1 epoch, ขีดแบ่ง = ขอบของ batch`, 4, 14);
+      for (let e = 0; e < rows; e++) {
+        const y = 26 + e * 38, w = W - 70;
+        ctx.fillStyle = '#444'; ctx.fillText(`epoch ${e + 1}`, 4, y + 15);
+        ctx.fillStyle = '#dbe7f6'; ctx.fillRect(64, y, w, 22);
+        ctx.strokeStyle = '#5b8fd1'; ctx.lineWidth = 1;
+        if (nb <= 150) for (let k = 1; k < nb; k++) { const x = 64 + k * b / N * w; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + 22); ctx.stroke(); }
+        else { ctx.fillStyle = '#1f5fbf'; ctx.fillText(`${fmtInt(nb)} batch (ถี่เกินกว่าจะวาดแยก)`, 72, y + 15); }
+      }
+    }
+
+    $('s42_out').innerHTML =
+      `iteration ต่อ epoch = ⌈${fmtInt(N)} / ${b}⌉ = <b>${fmtInt(nb)}</b>` + (last !== b ? ` (batch สุดท้ายมี ${last} ภาพ)` : ' (ทุก batch เต็มพอดี)') + '<br>' +
+      `iteration ทั้งหมด = ${fmtInt(nb)} × ${E} epoch = <b>${fmtInt(total)}</b> · ภาพแต่ละภาพถูกใช้ ${E} ครั้ง (หน้าตาต่างกันทุกครั้งเพราะ augmentation)<br>` +
+      `<span class="muted">Ultralytics:</span> warmup = max(round(3 × ${fmtInt(nb)}), 100) = ${fmtInt(nw)} iteration ${nw >= total ? '<b>(ยาวกว่าการเทรนทั้งหมด!)</b>' : `(≈ ${(nw / nb).toFixed(1)} epoch)`} · ` +
+      `หลัง warmup สะสม gradient ${acc} batch ต่อการปรับ 1 ครั้ง (${b} × ${acc} = ${b * acc} ภาพ) → ปรับ weight จริงทั้งหมด <b>${fmtInt(updates)}</b> ครั้ง (นับตามกฎใน trainer.py รวมช่วง warmup)<br>` +
+      `optimizer = auto: ⌈${fmtInt(N)} / max(${b}, 64)⌉ × ${E} = ${fmtInt(auto)} ก้าว ${auto > 10000 ? '&gt;' : '≤'} 10,000 → <b>${opt}</b>`;
+  }
+  function setPre(k) { pre = k; const [n, b, e] = PRE[k]; $('s42_n').value = n; $('s42_b').value = b; $('s42_e').value = e; draw(); }
+  root.querySelectorAll('[data-pre]').forEach(x => x.addEventListener('click', () => setPre(x.dataset.pre)));
+  ['s42_n', 's42_b', 's42_e'].forEach(id => $(id).addEventListener('input', () => { pre = ''; draw(); }));
+  root.querySelector('[data-act=reset]').addEventListener('click', () => setPre('small'));
+  setPre('small');
+})();
+
+/* =========================================================
+   ข้อมูลเส้นโค้งที่ใช้ร่วมในซิม 4.3 และ 4.4
+   ========================================================= */
+const CURVE = (function () {
+  const r = rng(6), f = x => 0.8 * Math.sin(Math.PI * x), noise = 0.25;
+  const strat = n => Array.from({ length: n }, (_, i) => {
+    const x = -1 + 2 * (i + 0.5) / n + (r() - 0.5) * 1.6 / n;
+    return [x, f(x) + noise * gauss(r)];
+  });
+  const train = { 12: strat(12), 40: strat(40) };
+  const val = Array.from({ length: 60 }, () => { const x = -1 + 2 * r(); return [x, f(x) + noise * gauss(r)]; });
+  return { f, train, val, noise };
+})();
+
+function drawCurvePlot(cv, n, model, extra) {
+  const { ctx, W, H } = setupCanvas(cv);
+  const L = 30, R = 8, T = 8, B = 22, YR = 1.8;
+  const px = x => L + (x + 1) / 2 * (W - L - R), py = y => T + (YR - y) / (2 * YR) * (H - T - B);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
+  for (let y = -1.5; y <= 1.5; y += 0.5) { ctx.beginPath(); ctx.moveTo(L, py(y)); ctx.lineTo(W - R, py(y)); ctx.stroke(); }
+  ctx.strokeStyle = '#999'; ctx.strokeRect(L, T, W - L - R, H - T - B);
+  ctx.fillStyle = '#666'; ctx.font = '10px Sarabun, sans-serif'; ctx.textAlign = 'right';
+  for (const y of [-1, 0, 1]) ctx.fillText(y, L - 4, py(y) + 3);
+  ctx.textAlign = 'center'; for (const x of [-1, 0, 1]) ctx.fillText(x, px(x), H - 8);
+  ctx.save(); ctx.beginPath(); ctx.rect(L, T, W - L - R, H - T - B); ctx.clip();
+  const line = (fn, color, w, dash) => {
+    ctx.strokeStyle = color; ctx.lineWidth = w; ctx.setLineDash(dash || []); ctx.beginPath();
+    for (let i = 0; i <= 300; i++) { const x = -1 + 2 * i / 300, y = Math.max(-5, Math.min(5, fn(x))); i ? ctx.lineTo(px(x), py(y)) : ctx.moveTo(px(x), py(y)); }
+    ctx.stroke(); ctx.setLineDash([]);
+  };
+  if (extra && extra.showTrue) line(CURVE.f, '#999', 1.5, [5, 4]);
+  if (extra && extra.best) line(extra.best, '#3f9d5a', 2, [6, 3]);
+  if (model) line(model, '#1f5fbf', 2.5);
+  for (const [x, y] of CURVE.val) { ctx.strokeStyle = '#e3892b'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(px(x), py(y), 3.2, 0, Math.PI * 2); ctx.stroke(); }
+  for (const [x, y] of CURVE.train[n]) { ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(px(x), py(y), 4, 0, Math.PI * 2); ctx.fill(); }
+  ctx.restore();
+}
+const mseOn = (fn, pts) => pts.reduce((s, [x, y]) => s + (fn(x) - y) ** 2, 0) / pts.length;
+
+/* =========================================================
+   ซิม 4.3 พหุนาม degree ต่าง ๆ
+   ========================================================= */
+(function () {
+  const root = $('s43');
+  // ใช้ฐาน Legendre แทน x, x², x³ … ตรง ๆ เพื่อให้คำนวณเสถียร (ได้เส้นเดียวกัน)
+  function legendre(x, d) { const P = [1, x]; for (let k = 2; k <= d; k++) P.push(((2 * k - 1) * x * P[k - 1] - (k - 1) * P[k - 2]) / k); return P.slice(0, d + 1); }
+  function fit(pts, d) {
+    const m = d + 1, A = Array.from({ length: m }, () => new Float64Array(m + 1));
+    for (const [x, y] of pts) { const p = legendre(x, d); for (let i = 0; i < m; i++) { for (let j = 0; j < m; j++) A[i][j] += p[i] * p[j]; A[i][m] += p[i] * y; } }
+    for (let i = 0; i < m; i++) A[i][i] += 1e-9;
+    for (let c = 0; c < m; c++) {
+      let piv = c; for (let i = c + 1; i < m; i++) if (Math.abs(A[i][c]) > Math.abs(A[piv][c])) piv = i;
+      [A[c], A[piv]] = [A[piv], A[c]];
+      for (let i = 0; i < m; i++) if (i !== c) { const k = A[i][c] / A[c][c]; for (let j = c; j <= m; j++) A[i][j] -= k * A[c][j]; }
+    }
+    const coef = A.map((row, i) => row[m] / row[i]);
+    return x => legendre(x, d).reduce((s, p, i) => s + p * coef[i], 0);
+  }
+  const CACHE = {};
+  for (const n of [12, 40]) CACHE[n] = Array.from({ length: 12 }, (_, d) => {
+    const fn = fit(CURVE.train[n], d);
+    return { fn, tr: mseOn(fn, CURVE.train[n]), va: mseOn(fn, CURVE.val) };
+  });
+  let st;
+  function draw() {
+    const C = CACHE[st.n], c = C[st.d];
+    drawCurvePlot($('s43_fit'), st.n, c.fn, { showTrue: st.showTrue });
+    const ds = C.map((_, d) => d);
+    const best = C.reduce((bi, o, d) => (o.va < C[bi].va ? d : bi), 0);
+    const tool = drawCurves($('s43_err'), [
+      { xs: ds, ys: C.map(o => Math.max(o.tr, 1e-4)), color: '#1f5fbf', dots: true },
+      { xs: ds, ys: C.map(o => o.va), color: '#e3892b', dots: true },
+    ], { log: true, xmax: 11, ymin: 1e-4, xlabel: 'degree (ความซับซ้อน)', vline: { x: st.d, color: '#ff00ff', label: `degree ${st.d}` } });
+    const { ctx } = setupCanvas($('s43_err'));
+    ctx.font = 'bold 11px Sarabun, sans-serif'; ctx.textAlign = 'left';
+    ctx.fillStyle = '#1f5fbf'; ctx.fillText('train error', 52, 268 - 40);
+    ctx.fillStyle = '#e3892b'; ctx.fillText('val error', 52, 268 - 54);
+    $('s43_d').value = st.d; $('s43_dv').textContent = st.d;
+    let diag;
+    if (c.va <= C[best].va * 1.25) diag = '✅ <b>พอดี</b> val error ใกล้ค่าต่ำสุดที่ทำได้';
+    else if (st.d < best) diag = '📉 <b>underfitting</b> โมเดลง่ายเกินไป ผิดทั้ง train และ val';
+    else diag = `📈 <b>overfitting</b> train error ${c.tr < 1e-6 ? '≈ 0' : 'ต่ำ'} แต่ val error สูงกว่าค่าต่ำสุด ${(c.va / C[best].va).toFixed(1)} เท่า`;
+    $('s43_out').innerHTML =
+      `พหุนาม degree ${st.d} (มีค่าให้ปรับ ${st.d + 1} ตัว) กับข้อมูลเทรน ${st.n} จุด<br>` +
+      `train error (MSE) = <b style="color:#1f5fbf">${c.tr < 1e-6 ? '≈ 0' : c.tr.toFixed(4)}</b> · val error = <b style="color:#e3892b">${c.va.toFixed(4)}</b> · ` +
+      `val ต่ำสุดที่ degree ${best} (${C[best].va.toFixed(4)})<br>${diag}`;
+    root.querySelectorAll('[data-n43]').forEach(b => b.classList.toggle('on', +b.dataset.n43 === st.n));
+    $('s43_true').checked = st.showTrue;
+  }
+  $('s43_d').addEventListener('input', e => { st.d = +e.target.value; draw(); });
+  $('s43_true').addEventListener('change', e => { st.showTrue = e.target.checked; draw(); });
+  root.querySelectorAll('[data-n43]').forEach(b => b.addEventListener('click', () => { st.n = +b.dataset.n43; draw(); }));
+  const reset = () => { st = { d: 1, n: 12, showTrue: true }; draw(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   ซิม 4.4 เครือข่ายเล็กเทรนตาม epoch
+   ========================================================= */
+const NET44 = { H: 40, lr: 0.003, seed: 3, maxEpoch: 4000, patience: 300, every: 10 };
+function makeNet(seed) {
+  const r = rng(seed), H = NET44.H;
+  return {
+    w1: Array.from({ length: H }, () => gauss(r) * 4), b1: Array.from({ length: H }, () => gauss(r) * 2),
+    w2: Array.from({ length: H }, () => gauss(r) / Math.sqrt(H)), b2: 0,
+    m: { w1: new Array(H).fill(0), b1: new Array(H).fill(0), w2: new Array(H).fill(0), b2: 0 },
+    v: { w1: new Array(H).fill(0), b1: new Array(H).fill(0), w2: new Array(H).fill(0), b2: 0 }, t: 0,
+  };
+}
+function netPredict(P, x) { let y = P.b2; for (let j = 0; j < NET44.H; j++) { const z = P.w1[j] * x + P.b1[j]; y += P.w2[j] * z * logistic(z); } return y; }
+// 1 epoch = forward ทุกจุด → backprop → Adam 1 ครั้ง (full batch)
+function netEpoch(P, pts) {
+  const H = NET44.H, g = { w1: new Array(H).fill(0), b1: new Array(H).fill(0), w2: new Array(H).fill(0), b2: 0 };
+  for (const [x, y] of pts) {
+    const z = P.w1.map((w, j) => w * x + P.b1[j]), s = z.map(logistic), h = z.map((zz, j) => zz * s[j]);
+    let p = P.b2; for (let j = 0; j < H; j++) p += P.w2[j] * h[j];
+    const e = 2 * (p - y) / pts.length;
+    g.b2 += e;
+    for (let j = 0; j < H; j++) { g.w2[j] += e * h[j]; const dz = e * P.w2[j] * s[j] * (1 + z[j] * (1 - s[j])); g.w1[j] += dz * x; g.b1[j] += dz; }
+  }
+  P.t++;
+  const c1 = 1 - 0.9 ** P.t, c2 = 1 - 0.999 ** P.t, lr = NET44.lr;
+  const upd = (key, j) => {
+    const gv = j === undefined ? g[key] : g[key][j];
+    const m = 0.9 * (j === undefined ? P.m[key] : P.m[key][j]) + 0.1 * gv, v = 0.999 * (j === undefined ? P.v[key] : P.v[key][j]) + 0.001 * gv * gv;
+    const d = lr * (m / c1) / (Math.sqrt(v / c2) + 1e-8);
+    if (j === undefined) { P.m[key] = m; P.v[key] = v; P[key] -= d; } else { P.m[key][j] = m; P.v[key][j] = v; P[key][j] -= d; }
+  };
+  for (const k of ['w1', 'b1', 'w2']) for (let j = 0; j < H; j++) upd(k, j);
+  upd('b2');
+}
+const cloneNet = P => ({ w1: P.w1.slice(), b1: P.b1.slice(), w2: P.w2.slice(), b2: P.b2 });
+
+(function () {
+  const root = $('s44');
+  let st, timer = null;
+  function init(n) {
+    stop();
+    const P = makeNet(NET44.seed);
+    st = { n, es: st ? st.es : false, P, ep: 0, hist: { x: [], tr: [], va: [] }, best: null, state: 'idle' };
+    record(); draw();
+  }
+  function record() {
+    const fn = x => netPredict(st.P, x), tr = mseOn(fn, CURVE.train[st.n]), va = mseOn(fn, CURVE.val);
+    st.hist.x.push(st.ep); st.hist.tr.push(tr); st.hist.va.push(va);
+    if (!st.best || va < st.best.va) st.best = { ep: st.ep, va, tr, P: cloneNet(st.P) };
+  }
+  function step() {
+    netEpoch(st.P, CURVE.train[st.n]); st.ep++;
+    if (st.ep % NET44.every === 0) record();
+    if (st.es && st.ep - st.best.ep >= NET44.patience) { st.state = 'early'; stop(); }
+    else if (st.ep >= NET44.maxEpoch) { st.state = 'done'; stop(); }
+  }
+  function stop() { if (timer) { cancelAnimationFrame(timer); timer = null; } }
+  function loop() { for (let i = 0; i < 20 && timer; i++) step(); draw(); if (timer) timer = requestAnimationFrame(loop); }
+  function draw() {
+    const bestFn = st.best && st.ep > st.best.ep + 50 ? (x => netPredict(st.best.P, x)) : null;
+    drawCurvePlot($('s44_fit'), st.n, x => netPredict(st.P, x), { showTrue: true, best: bestFn });
+    drawCurves($('s44_loss'), [
+      { xs: st.hist.x, ys: st.hist.tr, color: '#1f5fbf' },
+      { xs: st.hist.x, ys: st.hist.va, color: '#e3892b' },
+    ], { log: true, xmax: NET44.maxEpoch, ymin: 1e-3, ymax: 2, xlabel: 'epoch',
+         vline: st.best && st.ep > 0 ? { x: st.best.ep, color: '#3f9d5a', label: `best.pt (epoch ${st.best.ep})` } : null });
+    const { ctx } = setupCanvas($('s44_loss'));
+    ctx.font = 'bold 11px Sarabun, sans-serif'; ctx.textAlign = 'right';
+    ctx.fillStyle = '#e3892b'; ctx.fillText('val loss', 348, 200);
+    ctx.fillStyle = '#1f5fbf'; ctx.fillText('train loss', 348, 214);
+    const k = st.hist.x.length - 1;
+    let msg = '';
+    if (st.state === 'early') msg = `<br>🛑 <b>early stopping</b>: val loss ไม่ดีขึ้นมา ${NET44.patience} epoch หยุดที่ epoch ${st.ep} แล้วใช้ best.pt (epoch ${st.best.ep})`;
+    if (st.state === 'done') msg = `<br>🏁 เทรนครบ ${NET44.maxEpoch} epoch ตอนจบ val loss = ${st.hist.va[k].toFixed(4)} ส่วน best.pt (epoch ${st.best.ep}) val loss = ${st.best.va.toFixed(4)}`;
+    $('s44_out').innerHTML =
+      `epoch <b>${st.ep}</b> · train loss = <b style="color:#1f5fbf">${st.hist.tr[k].toFixed(4)}</b> · val loss = <b style="color:#e3892b">${st.hist.va[k].toFixed(4)}</b><br>` +
+      `val loss ต่ำสุดที่ epoch ${st.best.ep} (${st.best.va.toFixed(4)})${bestFn ? ' — เส้นประสีเขียวบนกราฟซ้ายคือโมเดล ณ จุดนั้น (best.pt)' : ''}${msg}`;
+    $('s44_run').textContent = timer ? '⏸ หยุด' : '▶ เทรน';
+    $('s44_es').checked = st.es;
+    root.querySelectorAll('[data-n44]').forEach(b => b.classList.toggle('on', +b.dataset.n44 === st.n));
+  }
+  $('s44_run').addEventListener('click', () => {
+    if (timer) { stop(); draw(); return; }
+    if (st.state !== 'idle') init(st.n);
+    st.state = 'idle'; timer = requestAnimationFrame(loop); draw();
+  });
+  $('s44_es').addEventListener('change', e => { st.es = e.target.checked; init(st.n); });
+  root.querySelectorAll('[data-n44]').forEach(b => b.addEventListener('click', () => init(+b.dataset.n44)));
+  root.querySelector('[data-act=reset]').addEventListener('click', () => { st.es = false; init(12); });
+  init(12);
+})();
+
+/* =========================================================
+   ซิม 4.5 data augmentation (เลียนแบบ RandomPerspective, RandomHSV, RandomFlip)
+   ========================================================= */
+(function () {
+  const root = $('s45'), grid = $('s45_grid'), S = 200, base = makeFruitImage(S, S);
+  const { X, Y, L } = sceneFrame(S, S), ap = FRUITS.find(f => f.id === 'apple1');
+  const box0 = [X(ap.cx) - L(ap.r) * 1.02, Y(ap.cy) - L(ap.r) * 1.06, X(ap.cx) + L(ap.r) * 1.02, Y(ap.cy) + L(ap.r) * 0.98];
+  let seed = 1;
+
+  // แปลงสีแบบ OpenCV 8 บิต: H 0–179, S และ V 0–255
+  function rgb2hsv(r, g, b) {
+    const v = Math.max(r, g, b), d = v - Math.min(r, g, b);
+    const s = v ? Math.round(d * 255 / v) : 0;
+    let h = 0;
+    if (d) { h = v === r ? 60 * (g - b) / d : v === g ? 120 + 60 * (b - r) / d : 240 + 60 * (r - g) / d; if (h < 0) h += 360; }
+    return [Math.round(h / 2) % 180, s, v];
+  }
+  function hsv2rgb(h, s, v) {
+    h *= 2; s /= 255;
+    const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+    const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+    return [r + m, g + m, b + m].map(Math.round);
+  }
+
+  function variant(k, on) {
+    const r = rng(seed * 1000 + k), U = () => 2 * r() - 1;
+    const p = {
+      s: on.geo ? 1 + U() * 0.5 : 1, tx: on.geo ? U() * 0.1 : 0, ty: on.geo ? U() * 0.1 : 0,
+      h: on.hsv ? U() * 0.015 : 0, sg: on.hsv ? U() * 0.7 : 0, vg: on.hsv ? U() * 0.4 : 0,
+      flip: on.flip ? r() < 0.5 : false,
+    };
+    const c = document.createElement('canvas'); c.width = S; c.height = S;
+    const x = c.getContext('2d');
+    x.fillStyle = 'rgb(114,114,114)'; x.fillRect(0, 0, S, S);
+    // จุด p → s·(p − กลางภาพ) + (0.5 + t)·S แล้วกลับซ้ายขวาถ้า flip
+    const ex = (0.5 + p.tx) * S - p.s * S / 2, ey = (0.5 + p.ty) * S - p.s * S / 2;
+    const mapX = u => (p.flip ? S - (p.s * u + ex) : p.s * u + ex), mapY = v => p.s * v + ey;
+    x.setTransform(p.flip ? -p.s : p.s, 0, 0, p.s, p.flip ? S - ex : ex, ey);
+    x.drawImage(base, 0, 0);
+    x.setTransform(1, 0, 0, 1, 0, 0);
+    if (p.h || p.sg || p.vg) {
+      const im = x.getImageData(0, 0, S, S), d = im.data;
+      const lutH = [], lutS = [], lutV = [];
+      for (let i = 0; i < 256; i++) {
+        lutH.push(Math.floor(((i + p.h * 180) % 180 + 180) % 180));
+        lutS.push(i === 0 ? 0 : Math.floor(Math.min(255, Math.max(0, i * (1 + p.sg)))));
+        lutV.push(Math.floor(Math.min(255, Math.max(0, i * (1 + p.vg)))));
+      }
+      for (let i = 0; i < d.length; i += 4) {
+        const [h, s, v] = rgb2hsv(d[i], d[i + 1], d[i + 2]);
+        const [rr, gg, bb] = hsv2rgb(lutH[h], lutS[s], lutV[v]);
+        d[i] = rr; d[i + 1] = gg; d[i + 2] = bb;
+      }
+      x.putImageData(im, 0, 0);
+    }
+    // กรอบเฉลยของแอปเปิลแดง: แปลงด้วยสูตรเดียวกับภาพ
+    const xs = [mapX(box0[0]), mapX(box0[2])].sort((a, b) => a - b), ys = [mapY(box0[1]), mapY(box0[3])];
+    const bx = [Math.max(0, xs[0]), Math.max(0, ys[0]), Math.min(S, xs[1]), Math.min(S, ys[1])];
+    if (bx[2] > bx[0] && bx[3] > bx[1]) {
+      x.strokeStyle = '#ff00ff'; x.lineWidth = 2.5; x.strokeRect(bx[0], bx[1], bx[2] - bx[0], bx[3] - bx[1]);
+      x.fillStyle = '#ff00ff'; x.fillRect(bx[0], Math.max(0, bx[1] - 14), 62, 14);
+      x.fillStyle = '#fff'; x.font = '11px Sarabun, sans-serif'; x.fillText('แอปเปิลแดง', bx[0] + 3, Math.max(11, bx[1] - 3));
+    }
+    return { c, p };
+  }
+
+  function draw() {
+    const on = { geo: $('s45_geo').checked, hsv: $('s45_hsv').checked, flip: $('s45_flip').checked };
+    grid.innerHTML = '';
+    for (let k = 0; k < 8; k++) {
+      const fig = document.createElement('figure');
+      let cap;
+      if (k === 0) {
+        const { c } = variant(0, { geo: false, hsv: false, flip: false });
+        fig.appendChild(c); cap = '<b>ภาพต้นฉบับ + เฉลย</b>';
+      } else {
+        const { c, p } = variant(k, on);
+        fig.appendChild(c);
+        const pct = v => (v >= 0 ? '+' : '') + Math.round(v * 100) + '%';
+        cap = `<b>รอบที่ ${k}</b>: ขยาย ×${p.s.toFixed(2)} · เลื่อน ${pct(p.tx)}, ${pct(p.ty)}<br>` +
+              `H ${p.h >= 0 ? '+' : ''}${(p.h * 360).toFixed(1)}° · S ×${(1 + p.sg).toFixed(2)} · V ×${(1 + p.vg).toFixed(2)}${p.flip ? ' · <b>กลับซ้าย↔ขวา</b>' : ''}`;
+      }
+      const fc = document.createElement('figcaption'); fc.innerHTML = cap; fig.appendChild(fc);
+      grid.appendChild(fig);
+    }
+  }
+  ['s45_geo', 's45_hsv', 's45_flip'].forEach(id => $(id).addEventListener('change', draw));
+  $('s45_new').addEventListener('click', () => { seed++; draw(); });
+  root.querySelector('[data-act=reset]').addEventListener('click', () => {
+    seed = 1; ['s45_geo', 's45_hsv', 's45_flip'].forEach(id => { $(id).checked = true; }); draw();
+  });
+  draw();
+})();
+
+/* =========================================================
+   รูปที่ 4.2 transfer learning (อ่านจาก data/ch4_transfer.json)
+   ========================================================= */
+(function () {
+  const root = $('tl');
+  let D = null, nc = '3', met = 'metrics/mAP50(B)';
+  const MET = { 'metrics/mAP50(B)': 'mAP50 ของกล่อง', 'metrics/mAP50-95(M)': 'mAP50-95 ของ mask', 'val/seg_loss': 'val seg_loss' };
+  function draw() {
+    root.querySelectorAll('[data-nc]').forEach(b => b.classList.toggle('on', b.dataset.nc === nc));
+    root.querySelectorAll('[data-met]').forEach(b => b.classList.toggle('on', b.dataset.met === met));
+    if (!D) return;
+    const t = D.transfer[nc], frac = t.params / t.params_total;
+    const { ctx, W, H } = setupCanvas($('tl_bar'));
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    const w = W - 8;
+    ctx.fillStyle = '#3f9d5a'; ctx.fillRect(4, 8, w * frac, 30);
+    ctx.fillStyle = '#d6453d'; ctx.fillRect(4 + w * frac, 8, Math.max(w * (1 - frac), frac < 1 ? 3 : 0), 30);
+    ctx.font = 'bold 13px Sarabun, sans-serif'; ctx.textAlign = 'left'; ctx.fillStyle = '#fff';
+    ctx.fillText(`มาจาก COCO ${(frac * 100).toFixed(1)}%`, 12, 28);
+    ctx.font = '12px Sarabun, sans-serif'; ctx.fillStyle = '#444';
+    ctx.fillText(frac < 1 ? 'สีแดง (ขวาสุด) = เริ่มจากค่าสุ่ม: สาขาทำนายคลาส (cv3) ของ Head ทั้ง 3 สเกล' : 'ทุกชิ้นตรงกันหมด ไม่มีส่วนที่ต้องสุ่มใหม่', 4, 58);
+    $('tl_out').innerHTML =
+      `งาน ${nc} คลาส: โอนได้ <b>${t.items}/${t.items_total}</b> ชิ้น (แบบที่ log พิมพ์ว่า "Transferred ${t.items}/${t.items_total} items") · ` +
+      `parameter ${fmtInt(t.params)} จาก ${fmtInt(t.params_total)} ตัว = <b>${(frac * 100).toFixed(1)}%</b>` +
+      (frac < 1 ? `<br>สุ่มใหม่ ${fmtInt(t.params_total - t.params)} ตัว: ${t.not_transferred_modules.join(', ')} — สาขานี้กว้าง max(64, min(nc, 100)) ช่อง (ใน <code>head.py</code>) จึงกว้าง 80 ช่องเมื่อ nc = 80 แต่ 64 ช่องเมื่อ nc = 3 ขนาดไม่ตรงกันทั้งสาขา` : '');
+    const R = D.runs, xs = R.pt.epoch;
+    drawCurves($('tl_chart'), [
+      { xs, ys: R.pt[met], color: '#3f9d5a', dots: true },
+      { xs: R.yaml.epoch, ys: R.yaml[met], color: '#d6453d', dots: true },
+    ], { xmin: 1, xmax: D.epochs, ymin: met === 'val/seg_loss' ? undefined : 0, ymax: met === 'val/seg_loss' ? undefined : 1, xlabel: 'epoch' });
+    const last = a => a[a.length - 1];
+    $('tl_out2').innerHTML =
+      `<span style="color:#3f9d5a">●</span> เริ่มจาก yolo11n-seg.pt: ${MET[met]} epoch 1 = <b>${R.pt[met][0].toFixed(3)}</b>, epoch ${D.epochs} = <b>${last(R.pt[met]).toFixed(3)}</b><br>` +
+      `<span style="color:#d6453d">●</span> เริ่มจาก yolo11n-seg.yaml: epoch 1 = <b>${R.yaml[met][0].toFixed(3)}</b>, epoch ${D.epochs} = <b>${last(R.yaml[met]).toFixed(3)}</b>`;
+  }
+  root.querySelectorAll('[data-nc]').forEach(b => b.addEventListener('click', () => { nc = b.dataset.nc; draw(); }));
+  root.querySelectorAll('[data-met]').forEach(b => b.addEventListener('click', () => { met = b.dataset.met; draw(); }));
+  draw();
+  fetch('../data/ch4_transfer.json').then(r => r.json()).then(j => { D = j; draw(); })
+    .catch(() => { $('tl_out').innerHTML = '⚠ โหลดข้อมูลไม่ได้ ต้องเปิดผ่าน <code>python -m http.server 8000</code> ไม่ใช่เปิดไฟล์ตรง ๆ'; });
+})();
+
+/* =========================================================
+   ซิม 4.6 data leakage
+   ========================================================= */
+(function () {
+  const root = $('s46'), cv = $('s46_cv'), { ctx, W, H } = setupCanvas(cv);
+  const LENS = [9, 14, 7, 12, 10, 8, 13, 6, 11, 10], K = 3, NV = 20, BS = 160, base = makeFruitImage(BS, BS);
+  const scene = [], start = [];
+  LENS.forEach((n, si) => { start.push(scene.length); for (let i = 0; i < n; i++) scene.push(si); });
+  const r0 = rng(21);
+  const LOOK = LENS.map((_, si) => ({
+    hue: si === 0 ? 0 : Math.round(r0() * 360), br: 0.8 + r0() * 0.45, zoom: 1.35 + r0() * 0.6,
+    u0: r0(), v0: r0() * 0.6 + 0.2, u1: r0(), v1: r0() * 0.6 + 0.2, flip: r0() < 0.4,
+  }));
+  const SCOL = ['#5b8fd1', '#e3a33b', '#3f9d5a', '#c45ab3', '#4fb3bf', '#8a6d3b', '#7a7fd6', '#d98c8c', '#6aa84f', '#b0a99c'];
+  const CELL = 44, TH = 38, GX = 8, GY = 8, DX = 452;
+  let st;
+
+  function thumb(i, x, y, size) {
+    const lk = LOOK[scene[i]], n = LENS[scene[i]], t = n > 1 ? (i - start[scene[i]]) / (n - 1) : 0;
+    const u = lk.u0 + (lk.u1 - lk.u0) * t, v = lk.v0 + (lk.v1 - lk.v0) * t, sw = BS / lk.zoom;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x, y, size, size); ctx.clip();
+    ctx.filter = `hue-rotate(${lk.hue}deg) brightness(${lk.br})`;
+    if (lk.flip) { ctx.translate(x * 2 + size, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(base, u * (BS - sw), v * (BS - sw), sw, sw, x, y, size, size);
+    ctx.restore();
+  }
+  function split() {
+    const isVal = new Array(100).fill(false), r = rng(st.seed * 7 + 1);
+    if (st.method === 'random') {
+      const a = Array.from({ length: 100 }, (_, i) => i);
+      for (let i = 99; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+      a.slice(0, NV).forEach(i => { isVal[i] = true; });
+    } else if (st.method === 'block') {
+      for (let i = 100 - NV; i < 100; i++) isVal[i] = true;
+    } else {
+      const order = LENS.map((_, i) => i);
+      for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+      let cnt = 0;
+      for (const s of order) { if (cnt >= NV - 2) break; for (let i = start[s]; i < start[s] + LENS[s]; i++) isVal[i] = true; cnt += LENS[s]; }
+    }
+    // หาภาพ train ที่เกือบซ้ำ (ฉากเดียวกัน ห่างไม่เกิน K เฟรม) ที่ใกล้ที่สุด
+    const twin = isVal.map((v, i) => {
+      if (!v) return -1;
+      for (let d = 1; d <= K; d++) for (const j of [i - d, i + d]) if (j >= 0 && j < 100 && !isVal[j] && scene[j] === scene[i]) return j;
+      return -1;
+    });
+    return { isVal, twin };
+  }
+  function draw() {
+    const { isVal, twin } = st.sp;
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+    for (let i = 0; i < 100; i++) {
+      const x = GX + (i % 10) * CELL, y = GY + Math.floor(i / 10) * (CELL + 2);
+      thumb(i, x, y, TH);
+      ctx.fillStyle = SCOL[scene[i]]; ctx.fillRect(x, y + TH + 1, TH, 3);
+      const leak = isVal[i] && twin[i] >= 0;
+      ctx.lineWidth = isVal[i] ? 3 : 1;
+      ctx.strokeStyle = !isVal[i] ? '#c9c3b8' : leak ? '#d6453d' : '#3f9d5a';
+      ctx.strokeRect(x - 1, y - 1, TH + 2, TH + 2);
+      if (i === st.sel || (st.sel >= 0 && i === twin[st.sel])) { ctx.strokeStyle = '#ff00ff'; ctx.lineWidth = 2; ctx.strokeRect(x - 4, y - 4, TH + 8, TH + 8); }
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(x, y, 17, 11);
+      ctx.fillStyle = '#fff'; ctx.font = '9px Consolas, monospace'; ctx.textAlign = 'left'; ctx.fillText(i, x + 1, y + 9);
+    }
+    // แผงขยาย
+    ctx.fillStyle = '#1f2933'; ctx.font = 'bold 13px Sarabun, sans-serif'; ctx.textAlign = 'left';
+    const s = st.sel;
+    if (s < 0) {
+      ctx.fillText('คลิกภาพ val', DX, 24); ctx.font = '12px Sarabun, sans-serif'; ctx.fillText('(กรอบเขียว/แดง) เพื่อดู', DX, 42); ctx.fillText('ภาพคู่ที่เกือบซ้ำ', DX, 58);
+    } else {
+      ctx.fillText(`${isVal[s] ? 'val' : 'train'} เฟรม ${s}`, DX, 20); thumb(s, DX, 28, 170);
+      ctx.strokeStyle = isVal[s] ? (twin[s] >= 0 ? '#d6453d' : '#3f9d5a') : '#c9c3b8'; ctx.lineWidth = 3; ctx.strokeRect(DX, 28, 170, 170);
+      ctx.fillStyle = '#1f2933'; ctx.font = 'bold 13px Sarabun, sans-serif';
+      if (isVal[s] && twin[s] >= 0) {
+        ctx.fillText(`train เฟรม ${twin[s]} (ห่าง ${Math.abs(twin[s] - s)} เฟรม)`, DX, 222); thumb(twin[s], DX, 230, 170);
+        ctx.strokeStyle = '#c9c3b8'; ctx.strokeRect(DX, 230, 170, 170);
+        ctx.fillStyle = '#d6453d'; ctx.fillText('แทบเหมือนกัน = ข้อสอบรั่ว', DX, 420);
+      } else if (isVal[s]) {
+        ctx.fillStyle = '#3f9d5a'; ctx.font = '12px Sarabun, sans-serif';
+        ctx.fillText('ไม่มีภาพเกือบซ้ำใน train', DX, 222); ctx.fillText('ภาพนี้วัดความเก่งได้จริง', DX, 240);
+      }
+    }
+    const nVal = isVal.filter(Boolean).length, nLeak = twin.filter(j => j >= 0).length;
+    const M = { random: 'สุ่มทีละภาพ', block: 'แบ่งเป็นช่วง (เฟรม 80–99 เป็น val)', group: 'แบ่งตามฉาก' };
+    $('s46_out').innerHTML =
+      `วิธี: <b>${M[st.method]}</b> · val ${nVal} ภาพ · มีภาพเกือบซ้ำอยู่ใน train <b style="color:${nLeak ? '#d6453d' : '#3f9d5a'}">${nLeak} ภาพ (${Math.round(nLeak / nVal * 100)}%)</b>` +
+      (st.method === 'group' ? ` · ฉากที่เป็น val: ${[...new Set(isVal.map((v, i) => (v ? scene[i] + 1 : null)).filter(v => v))].join(', ')}` : '') +
+      (st.method === 'block' ? ' · ปุ่มสุ่มใหม่ไม่มีผลกับวิธีนี้' : '');
+    root.querySelectorAll('[data-split]').forEach(b => b.classList.toggle('on', b.dataset.split === st.method));
+  }
+  function apply() {
+    st.sp = split();
+    st.sel = st.sp.twin.findIndex(j => j >= 0);
+    if (st.sel < 0) st.sel = st.sp.isVal.indexOf(true);
+    draw();
+  }
+  root.querySelectorAll('[data-split]').forEach(b => b.addEventListener('click', () => { st.method = b.dataset.split; apply(); }));
+  $('s46_new').addEventListener('click', () => { st.seed++; apply(); });
+  cv.addEventListener('pointerdown', e => {
+    const [x, y] = canvasXY(cv, e, W, H), c = Math.floor((x - GX) / CELL), r = Math.floor((y - GY) / (CELL + 2));
+    if (c >= 0 && c < 10 && r >= 0 && r < 10) { st.sel = r * 10 + c; draw(); }
+  });
+  const reset = () => { st = { method: 'random', seed: 1 }; apply(); };
+  root.querySelector('[data-act=reset]').addEventListener('click', reset);
+  reset();
+})();
+
+/* =========================================================
+   🔗 และแบบทดสอบ
+   ========================================================= */
+renderPipeline($('pipe'), ['image', 'letterbox', 'backbone', 'neck', 'head']);
+
+initQuiz($('quiz'), [
+  {
+    q: 'กราฟคำนวณ u = w·x แล้วต่อไปถึง L ถ้า backward ส่งค่า ∂L/∂u = −2 กลับมา และ x = 3 ค่า ∂L/∂w เท่าใด',
+    options: ['−6', '−2', '1', '−0.67'],
+    answer: 0,
+    explain: 'กฎลูกโซ่: ∂L/∂w = ∂L/∂u × ∂u/∂w = −2 × x = −2 × 3 = −6 (โหนดคูณส่งความชันเท่ากับ "อีกตัวที่คูณอยู่")',
+  },
+  {
+    q: 'ข้อใดอธิบายข้อดีของ backpropagation ได้ถูกต้องที่สุด',
+    options: ['ทำให้ไม่ต้องใช้ learning rate', 'ได้ gradient ของทุก weight จากการย้อนกลับรอบเดียว แทนที่จะขยับ weight ทีละตัว', 'ทำให้ loss เป็น 0 ทันที', 'ใช้แทน forward pass ได้'],
+    answer: 1,
+    explain: 'backpropagation ใช้ตัวเลขที่คำนวณไว้จากโหนดทางขวาซ้ำ ได้ gradient ครบทุกตัวในเวลาราว 2 เท่าของ forward หนึ่งรอบ ยังต้องใช้ learning rate และ optimizer ตามบทที่ 3',
+  },
+  {
+    q: 'ชุดเทรนมี 1,000 ภาพ batch = 16 จะได้กี่ iteration ต่อ epoch',
+    options: ['62', '63', '16', '1,000'],
+    answer: 1,
+    explain: '1000 / 16 = 62.5 ปัดขึ้นเป็น 63 iteration โดย batch สุดท้ายมี 8 ภาพ (Ultralytics ไม่ทิ้ง batch ที่ไม่เต็ม)',
+  },
+  {
+    q: 'กราฟผลเทรนแสดงว่า train loss ลดลงเรื่อย ๆ แต่ val loss เริ่มเพิ่มขึ้นตั้งแต่ epoch 40 หมายความว่าอะไร',
+    options: ['underfitting ควรเทรนนานขึ้น', 'overfitting โมเดลเริ่มจำชุดเทรน', 'learning rate เล็กเกินไป', 'ข้อมูล val ผิด'],
+    answer: 1,
+    explain: 'train ดีขึ้นแต่ข้อมูลที่ไม่เคยเห็นแย่ลง คือสัญญาณ overfitting ควรใช้น้ำหนักช่วงที่ val ดีที่สุด (best.pt) และเพิ่มข้อมูลหรือ augmentation',
+  },
+  {
+    q: 'ข้อใด <u>ไม่ใช่</u> วิธีลด overfitting',
+    options: ['เพิ่มจำนวนภาพเทรน', 'เปิด data augmentation', 'เริ่มจาก pretrained weight', 'เทรนต่อไปเรื่อย ๆ หลัง val loss เริ่มขึ้น'],
+    answer: 3,
+    explain: 'การเทรนต่อหลัง val loss เริ่มขึ้นทำให้ overfit มากขึ้น ควรหยุด (early stopping) หรือใช้ best.pt แทน',
+  },
+  {
+    q: 'ทำไม data augmentation จึงทำกับชุด train เท่านั้น ไม่ทำกับชุด val',
+    options: ['เพราะ val ต้องสะท้อนภาพจริงที่โมเดลจะเจอ เพื่อวัดผลอย่างเที่ยงตรง', 'เพราะ augmentation ทำให้ภาพเสีย', 'เพราะชุด val ไม่มีเฉลย', 'เพราะคำนวณช้า'],
+    answer: 0,
+    explain: 'augmentation มีไว้ให้โมเดลได้ฝึกกับความหลากหลายมากขึ้น ส่วน val มีไว้วัดผลกับภาพจริงตามปกติ Ultralytics สร้างชุด val ด้วย augment=False',
+  },
+  {
+    q: 'นำภาพเฟรมวิดีโอ 10,000 เฟรมมาสุ่มแบ่ง train/val ทีละภาพ ได้ mAP บน val สูงมาก แต่ใช้กับวิดีโอใหม่กลับแย่ สาเหตุที่น่าจะเป็นที่สุดคืออะไร',
+    options: ['learning rate ใหญ่เกินไป', 'data leakage: เฟรมใน val มีเฟรมเกือบซ้ำอยู่ใน train', 'batch size เล็กเกินไป', 'ใช้ pretrained weight'],
+    answer: 1,
+    explain: 'เฟรมที่ติดกันแทบเหมือนกัน การสุ่มทีละภาพทำให้ val แทบทุกภาพมีฝาแฝดอยู่ใน train (ซิม 4.6) ควรแบ่งตามวิดีโอหรือตามฉาก',
+  },
+  {
+    q: 'เทรน yolo11n-seg.pt กับชุดผลไม้ 3 คลาส ส่วนใดของโมเดลที่เริ่มจากค่าสุ่ม (ultralytics 8.4.2)',
+    options: ['ทั้งโมเดล', 'เฉพาะ Backbone', 'สาขาทำนายคลาส (cv3) ของ Head ประมาณ 1.6% ของ parameter', 'ไม่มีส่วนไหนสุ่มเลย'],
+    answer: 2,
+    explain: 'สาขาคลาสกว้าง max(64, min(nc, 100)) ช่อง จาก 80 ช่องจึงเหลือ 64 ขนาดไม่ตรงกับไฟล์ .pt สาขานี้ทั้งหมดจึงเริ่มจากสุ่ม ส่วนอื่น 98.4% ของ parameter โอนมาจาก COCO',
+  },
+]);
+</script>
+</body>
+</html>
