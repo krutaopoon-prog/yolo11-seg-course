@@ -52,7 +52,7 @@ pre code { background: none; padding: 0; }
 table { border-collapse: collapse; margin: 0.8em 0; font-size: 0.95rem; }
 th, td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; vertical-align: top; }
 th { background: var(--code-bg); }
-.table-wrap { overflow-x: auto; }
+.table-wrap { overflow-x: auto; position: relative; }   /* ให้ชั้น MathML ที่ซ่อนของ KaTeX ไม่ล้นออกนอกกรอบเลื่อน */
 
 /* กล่องข้อความ */
 .box { border-left: 4px solid; border-radius: 4px; padding: 10px 14px; margin: 1.2em 0; }
@@ -126,6 +126,12 @@ footer { margin-top: 3em; font-size: 0.85rem; color: var(--muted); border-top: 1
 .toc li { margin: 2px 0; }
 .toc .soon { color: #a8a29a; }
 .toc .unit { font-weight: 700; margin-top: 1em; list-style: none; margin-left: -1.2em; }
+
+/* สมการ (KaTeX) */
+.katex { font-size: 1.08em; }
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 0.8em 0; }
+.box .katex-display { margin: 0.5em 0; }
+.sim-out .katex { font-size: 1em; }
 
 @media (max-width: 520px) {
   body { font-size: 17px; }
